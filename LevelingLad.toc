@@ -1,0 +1,22 @@
+## Interface: 16001
+## Title: Leveling Lad |cff00ccff(LL)|r
+## Notes: Optimizes TradeSkill leveling (1-300) at the lowest net gold cost with dynamic skillup probability, over-buy prevention, live AH verification, and one-click crafting.
+## Author: doodadrood
+## Version: 1.0.0
+## SavedVariables: LevelingLad_DB
+## OptionalDeps: PriceCheckerForever, TradeSkillMaster, Auctionator
+## X-Category: Professions
+
+Modules/PCFEmbedPre.lua
+Libs/PriceCheckerForever/Embed.xml
+Modules/PCFEmbedPost.lua
+Config.lua
+Utils/Formatter.lua
+Data/VendorDatabase.lua
+Data/RecipeDatabase.lua
+Modules/RecipeScanner.lua
+Modules/LevelingEngine.lua
+Modules/AHVerifier.lua
+UI/DetailWindow.lua
+UI/SideWindow.lua
+Core.lua

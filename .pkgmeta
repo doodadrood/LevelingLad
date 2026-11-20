@@ -1,0 +1,18 @@
+package-as: LevelingLad
+
+externals:
+  Libs/PriceCheckerForever:
+    url: https://github.com/doodadrood/PriceCheckerForever.git
+    tag: latest
+
+ignore:
+  - Tests
+  - Tools
+  - .agents
+  - .antigravity
+  - AGENTS.md
+  - .git
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - README.md
