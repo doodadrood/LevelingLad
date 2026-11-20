@@ -6,6 +6,7 @@
 ## SavedVariables: LevelingLad_DB
 ## OptionalDeps: PriceCheckerForever, TradeSkillMaster, Auctionator
 ## X-Category: Professions
+## X-Curse-Project-ID: 1819377
 
 Modules/PCFEmbedPre.lua
 Libs/PriceCheckerForever/Embed.xml
