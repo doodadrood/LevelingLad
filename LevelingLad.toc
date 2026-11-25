@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: Leveling Lad |cff00ccff(LL)|r
-## Notes: Optimizes TradeSkill leveling (1-300) at the lowest net gold cost with dynamic skillup probability, over-buy prevention, live AH verification, and one-click crafting.
+## Notes: WoW: Forever TradeSkill leveling optimizer — calculates the lowest net gold path using live client recipes, dynamic skillup probability, over-buy prevention, AH verification, and one-click crafting.
 ## Author: doodadrood
 ## Version: 1.0.0
 ## SavedVariables: LevelingLad_DB

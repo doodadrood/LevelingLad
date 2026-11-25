@@ -132,6 +132,9 @@ local function CycleProfession()
     end
 
     LevelingLad_DB.settings.selectedProfession = list[nextIdx].skillLine
+    if LL.SyncActivePlayWithGoal then
+        LL.SyncActivePlayWithGoal()
+    end
     LL.SideWindow.RunSearch()
 end
 
@@ -196,9 +199,17 @@ local function EnsureSideWindow()
     if targetPlus5Btn.SetSize then targetPlus5Btn:SetSize(84, 22) end
     if targetPlus5Btn.SetPoint then targetPlus5Btn:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -68) end
     SetBackdropSafe(targetPlus5Btn, 0.14, 0.16, 0.20, 0.92)
+    local plus5Text = targetPlus5Btn.CreateFontString and targetPlus5Btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if plus5Text then
+        if plus5Text.SetPoint then plus5Text:SetPoint("CENTER", targetPlus5Btn, "CENTER", 0, 0) end
+        targetPlus5Btn.labelText = plus5Text
+    end
     targetPlus5Btn:SetScript("OnClick", function()
         LevelingLad_DB.settings.targetMode = "PLUS5"
         LevelingLad_DB.settings.targetSkillRank = 0
+        if LL.SyncActivePlayWithGoal then
+            LL.SyncActivePlayWithGoal()
+        end
         LL.SideWindow.RunSearch()
     end)
 
@@ -206,9 +217,17 @@ local function EnsureSideWindow()
     if targetMilestoneBtn.SetSize then targetMilestoneBtn:SetSize(128, 22) end
     if targetMilestoneBtn.SetPoint then targetMilestoneBtn:SetPoint("LEFT", targetPlus5Btn, "RIGHT", 6, 0) end
     SetBackdropSafe(targetMilestoneBtn, 0.10, 0.30, 0.42, 0.95)
+    local milestoneText = targetMilestoneBtn.CreateFontString and targetMilestoneBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if milestoneText then
+        if milestoneText.SetPoint then milestoneText:SetPoint("CENTER", targetMilestoneBtn, "CENTER", 0, 0) end
+        targetMilestoneBtn.labelText = milestoneText
+    end
     targetMilestoneBtn:SetScript("OnClick", function()
         LevelingLad_DB.settings.targetMode = "MILESTONE"
         LevelingLad_DB.settings.targetSkillRank = 0
+        if LL.SyncActivePlayWithGoal then
+            LL.SyncActivePlayWithGoal()
+        end
         LL.SideWindow.RunSearch()
     end)
 
@@ -219,9 +238,13 @@ local function EnsureSideWindow()
     targetCustomInput:SetScript("OnEnterPressed", function(self)
         local val = tonumber(self:GetText())
         if val and val > 1 and val <= 300 then
+            local goal = math.floor(val)
             LevelingLad_DB.settings.targetMode = "CUSTOM"
-            LevelingLad_DB.settings.customTargetSkill = math.floor(val)
-            LevelingLad_DB.settings.targetSkillRank = math.floor(val)
+            LevelingLad_DB.settings.customTargetSkill = goal
+            LevelingLad_DB.settings.targetSkillRank = goal
+            if LL.SyncActivePlayWithGoal then
+                LL.SyncActivePlayWithGoal(goal)
+            end
             LL.SideWindow.RunSearch()
         end
         if self.ClearFocus then self:ClearFocus() end
@@ -234,11 +257,16 @@ local function EnsureSideWindow()
     targetApplyBtn:SetScript("OnClick", function()
         local val = tonumber(targetCustomInput:GetText())
         if val and val > 1 and val <= 300 then
+            local goal = math.floor(val)
             LevelingLad_DB.settings.targetMode = "CUSTOM"
-            LevelingLad_DB.settings.customTargetSkill = math.floor(val)
-            LevelingLad_DB.settings.targetSkillRank = math.floor(val)
+            LevelingLad_DB.settings.customTargetSkill = goal
+            LevelingLad_DB.settings.targetSkillRank = goal
+            if LL.SyncActivePlayWithGoal then
+                LL.SyncActivePlayWithGoal(goal)
+            end
             LL.SideWindow.RunSearch()
         end
+        if targetCustomInput.ClearFocus then targetCustomInput:ClearFocus() end
     end)
 
     -- Row 3: Budget Input + Apply
@@ -288,6 +316,9 @@ local function EnsureSideWindow()
     if roadmapBtn.SetPoint then roadmapBtn:SetPoint("LEFT", findBtn, "RIGHT", 6, 0) end
     if roadmapBtn.SetText then roadmapBtn:SetText("Milestone Path") end
     roadmapBtn:SetScript("OnClick", function()
+        if LL.RecipeScanner and LL.RecipeScanner.ScanCurrentProfessionWindow then
+            LL.RecipeScanner.ScanCurrentProfessionWindow()
+        end
         local active = LL.RecipeScanner.GetActiveProfession()
         local target = LL.GetTargetSkill(active.rank, active.maxRank)
         local roadmap = LL.LevelingEngine.PlanMilestonePath(active.skillLine, active.rank, target)
@@ -396,13 +427,32 @@ function LL.SideWindow.Refresh()
         frame.recoveryBtn:SetText(RECOVERY_LABELS[recovery] or "Recovery: Vendor")
     end
     if frame.targetPlus5Btn then
-        frame.targetPlus5Btn:SetText(mode == "PLUS5" and "|cff00ff88[+5 Points]|r" or "|cffaaaaaa[+5 Points]|r")
+        local txt = mode == "PLUS5" and "|cff00ff88[+5 Points]|r" or "|cffaaaaaa[+5 Points]|r"
+        frame.targetPlus5Btn:SetText(txt)
+        if frame.targetPlus5Btn.labelText then
+            frame.targetPlus5Btn.labelText:SetText(txt)
+        end
         SetBtnBgColor(frame.targetPlus5Btn, mode == "PLUS5" and 0.08 or 0.14, mode == "PLUS5" and 0.32 or 0.16, mode == "PLUS5" and 0.24 or 0.20, 0.94)
     end
     if frame.targetMilestoneBtn then
         local lbl = string.format("Next Tier: %d", nextTier)
-        frame.targetMilestoneBtn:SetText(mode == "MILESTONE" and ("|cff00ff88[" .. lbl .. "]|r") or ("|cffaaaaaa[" .. lbl .. "]|r"))
+        local txt = mode == "MILESTONE" and ("|cff00ff88[" .. lbl .. "]|r") or ("|cffaaaaaa[" .. lbl .. "]|r")
+        frame.targetMilestoneBtn:SetText(txt)
+        if frame.targetMilestoneBtn.labelText then
+            frame.targetMilestoneBtn.labelText:SetText(txt)
+        end
         SetBtnBgColor(frame.targetMilestoneBtn, mode == "MILESTONE" and 0.08 or 0.14, mode == "MILESTONE" and 0.32 or 0.16, mode == "MILESTONE" and 0.24 or 0.20, 0.94)
+    end
+    if frame.targetCustomInput then
+        local hasFocus = frame.targetCustomInput.HasFocus and frame.targetCustomInput:HasFocus()
+        if not hasFocus then
+            local customVal = tonumber(LevelingLad_DB.settings.customTargetSkill)
+            if mode == "CUSTOM" and customVal and customVal > 0 then
+                frame.targetCustomInput:SetText(tostring(math.floor(customVal)))
+            elseif (frame.targetCustomInput:GetText() or "") == "" then
+                frame.targetCustomInput:SetText(tostring(LL.GetTargetSkill(active.rank, active.maxRank)))
+            end
+        end
     end
     if frame.budgetInfoText then
         frame.budgetInfoText:SetText(isCapped
@@ -435,7 +485,8 @@ function LL.SideWindow.Refresh()
             btn._needsAHScan = false
             btn:Show()
             local badge = LL.Formatter.FormatDifficultyBadge(play.startDifficulty, play.endDifficulty)
-            local trainerTag = play.needsTrainer and " |cff00ccff[Trainer]|r" or ""
+            local trainerLabel = (play.source and play.source ~= "" and play.source ~= "Known") and play.source or "Trainer"
+            local trainerTag = play.needsTrainer and string.format(" |cff00ccff[%s]|r", trainerLabel) or ""
             btn.mainText:SetText(string.format("#%d %s  %s%s", i, play.outputLink or play.recipeName, badge, trainerTag))
             btn.subText:SetText(string.format(
                 "Craft %dx (%d->%d, +%d pts)  |  %s/pt  |  Total: %s",
@@ -460,6 +511,10 @@ function LL.SideWindow.Refresh()
                     btn.mainText:SetText("|cffffcc00No Auction House Data Found|r")
                     btn.subText:SetText("Open the Auction House and run a PCF scan first.")
                     btn.extraText:SetText("")
+                elseif #(LL.RecipeScanner.GetRecipesForProfession(active.skillLine) or {}) == 0 then
+                    btn.mainText:SetText(string.format("|cffffcc00Open %s Once to Scan WoW: Forever Recipes|r", active.name or "Profession"))
+                    btn.subText:SetText("Open your profession window, then click 'Find Top 5 Plays'.")
+                    btn.extraText:SetText("")
                 else
                     btn.mainText:SetText("|cffaaaaaaNo eligible leveling plays found.|r")
                     btn.subText:SetText("Check budget cap, profession rank, or click 'Find Top 5 Plays'.")
@@ -474,6 +529,9 @@ end
 
 function LL.SideWindow.RunSearch()
     EnsureSideWindow()
+    if LL.RecipeScanner and LL.RecipeScanner.ScanCurrentProfessionWindow then
+        LL.RecipeScanner.ScanCurrentProfessionWindow()
+    end
     local active = LL.RecipeScanner.GetActiveProfession()
     local plays = LL.AHVerifier.StartVerification(active.skillLine, {
         onUpdate = function(idx, total, target)

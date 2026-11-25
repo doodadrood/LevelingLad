@@ -25,7 +25,7 @@ _G.LevelingLad_DB = LevelingLad_DB
 local MILESTONES = { 75, 150, 225, 300 }
 
 local defaultConfig = {
-    version = 1,
+    version = 4,
     settings = {
         enabled = true,
         budgetCopper = 0,                    -- 0 = unlimited (uses full character gold); >0 = hard gold cap in copper
@@ -50,6 +50,7 @@ local defaultConfig = {
     },
     charRecipes = {},        -- [charKey] = { [recipeKey] = recipeTable }
     charSkills = {},         -- [charKey] = { [skillLine] = { name, rank, maxRank, skillLine } }
+    trainerRecipes = {},     -- [skillLine] = { [nameLower] = { name, minSkill, trainerCost, outputItemId } }
     vendorBuyPrices = {},    -- [itemId] = copperPrice (dynamically updated from MERCHANT_SHOW)
     itemCache = {},          -- [itemId] = { name, link, quality, itemLevel, classID, subClassID, invType, texture, vendorSell }
     orderBookCache = {},     -- [itemId] = { timestamp = 0, listings = { { unitPrice, quantity }, ... }, unavailable = false }
@@ -194,6 +195,33 @@ function LL.GetTargetSkill(currentSkill, maxRank, targetOverride)
     return math.min(ceiling, LL.GetNextMilestone(currentSkill, maxRank))
 end
 
+-- Clears a stale activePlay when the user changes their target skill goal
+-- (prevents old e.g. target=260 alerts from firing after setting a new goal like 265).
+function LL.SyncActivePlayWithGoal(explicitNewGoal)
+    local newGoal = tonumber(explicitNewGoal)
+    if type(LevelingLad_DB) == "table" and type(LevelingLad_DB.activePlay) == "table" then
+        local ap = LevelingLad_DB.activePlay
+        if not newGoal then
+            local rank, maxRank = 1, 300
+            if LL.RecipeScanner and LL.RecipeScanner.GetProfessionSkill then
+                local r, m = LL.RecipeScanner.GetProfessionSkill(ap.skillLine or ap.profession)
+                rank = r or ap.liveSkill or ap.startSkill or 1
+                maxRank = m or 300
+            end
+            newGoal = LL.GetTargetSkill(rank, maxRank)
+        end
+        local detailShown = LL.DetailWindow and LL.DetailWindow.frame
+            and (not LL.DetailWindow.frame.IsShown or LL.DetailWindow.frame:IsShown())
+        local trackedGoal = ap.goalTargetSkill or ap.requestedTargetSkill or ap.reachedSkill or ap.targetSkill
+        if not detailShown or trackedGoal ~= newGoal then
+            LevelingLad_DB.activePlay = nil
+        end
+    end
+    if LL.DetailWindow and LL.DetailWindow.ClearStalePlay then
+        LL.DetailWindow.ClearStalePlay(newGoal)
+    end
+end
+
 -- Returns 0.15 at a Neutral AH, otherwise the configured faction AH cut (default 0.05).
 function LL.GetEffectiveAHCutRate()
     if _G.GetAuctionHouseDepositRate then
@@ -323,6 +351,18 @@ function LL.LoadConfig(customDB)
     end
     _G.LevelingLad_DB = LevelingLad_DB
 
+    local prevVersion = tonumber(LevelingLad_DB.version) or 0
     ApplyDefaults(LevelingLad_DB, defaultConfig)
+
+    -- v4 migration: purge unlearned C_TradeSkillUI recipes (e.g. phase-locked / drop / 300-skill recipes
+    -- like Elemental Sharpening Stone & Ebon Shiv that lacked minSkill) and clear stale activePlay targets.
+    if prevVersion > 0 and prevVersion < 4 then
+        LevelingLad_DB.charRecipes = {}
+        LevelingLad_DB.lastTopPlays = {}
+        LevelingLad_DB.lastRoadmap = nil
+        LevelingLad_DB.activePlay = nil
+        LevelingLad_DB.version = 4
+    end
+
     return LevelingLad_DB
 end

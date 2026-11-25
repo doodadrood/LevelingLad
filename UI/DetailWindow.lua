@@ -391,6 +391,17 @@ function LL.DetailWindow.ShowRoadmap(roadmap)
     LL.DetailWindow.ShowPlay(roadmap)
 end
 
+function LL.DetailWindow.ClearStalePlay(newGoal)
+    if not currentPlay then return end
+    local trackedGoal = currentPlay.goalTargetSkill or currentPlay.requestedTargetSkill or currentPlay.reachedSkill or currentPlay.targetSkill
+    if not newGoal or trackedGoal ~= newGoal then
+        currentPlay = nil
+        if detailFrame and detailFrame.Hide then
+            detailFrame:Hide()
+        end
+    end
+end
+
 function LL.DetailWindow.OnSkillUp(profName, newSkill, skillLine, goalReached)
     if not currentPlay then return end
     if currentPlay.skillLine == skillLine or currentPlay.profession == profName then

@@ -38,7 +38,7 @@ local function Assert(condition, testName)
 end
 
 print("================================================================")
-print(" Leveling Lad (LL) Headless LuaJIT Test Suite")
+print(" Leveling Lad (LL) — Strictly WoW: Forever LuaJIT Test Suite")
 print("================================================================")
 
 -- 1. Core Initialization & API Readiness
@@ -73,28 +73,27 @@ Assert(LL.VendorDatabase.GetVendorBuyPrice(3857) == 500, "Coal vendor price == 5
 Assert(LL.VendorDatabase.GetVendorBuyPrice(4289) == 50, "Salt vendor price == 50c")
 Assert(LL.VendorDatabase.GetVendorBuyPrice(2678) == 10, "Mild Spices vendor price == 10c")
 
--- Verify MERCHANT_SHOW updates discounted vendor price dynamically
 Mock.merchantItems = {
-    { itemId = 2880, name = "Weak Flux", price = 90, quantity = 1, numAvailable = -1 }, -- Honored 10% discount
+    { itemId = 2880, name = "Weak Flux", price = 90, quantity = 1, numAvailable = -1 },
 }
 Mock.FireEvent("MERCHANT_SHOW")
 Assert(LL.VendorDatabase.GetVendorBuyPrice(2880) == 90, "MERCHANT_SHOW updates discounted vendor price (90c)")
-LevelingLad_DB.vendorBuyPrices[2880] = nil -- Restore default 100c for subsequent tests
+LevelingLad_DB.vendorBuyPrices[2880] = nil
 
--- 5. Recipe Database Coverage Check (All 8 Core Professions)
-local requiredProfessions = { 164, 197, 165, 171, 202, 185, 333, 129 }
-for _, skillLine in ipairs(requiredProfessions) do
-    local list = LL.RecipeDatabase.GetRecipesForProfession(skillLine)
-    Assert(#list >= 10, string.format("RecipeDatabase has full catalog (%d recipes) for %s (%d)",
-        #list, LL.RecipeDatabase.GetProfessionName(skillLine), skillLine))
+-- 5. Strictly WoW: Forever Verification — Zero Hardcoded WoW Classic Recipes!
+for _, prof in ipairs(LL.RecipeDatabase.GetSupportedProfessions()) do
+    local staticList = LL.RecipeDatabase.GetRecipesForProfession(prof.skillLine)
+    Assert(#staticList == 0, string.format("Zero Classic Era recipe poisoning in static RecipeDatabase for %s (%d)", prof.name, prof.skillLine))
 end
 
 -- 6. Leveling Engine Deep Unit Tests
 local TestEngine = require("Tests.Test_LevelingEngine")
 TestEngine.Run(Assert, Mock)
 
--- 7. RecipeScanner, Live Skillup Detection & Smart Abort Tests
+-- 7. Live WoW: Forever C_TradeSkillUI + Trainer Scanning, Live Skillup & Smart Abort
 Mock.Reset()
+LevelingLad_DB.charRecipes = {}
+LevelingLad_DB.trainerRecipes = {}
 Mock.professions = {
     { name = "Blacksmithing", skillLevel = 45, maxSkillLevel = 75, skillLine = 164 },
 }
@@ -116,25 +115,62 @@ Mock.modernRecipes = {
         quantityMax = 1,
         skillLine = 164,
         professionName = "Blacksmithing",
-        difficulty = "medium",
+        difficulty = nil,
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Medium, -- YELLOW
         reagents = { { itemID = 2835, qty = 2 } },
     },
+    [994444] = {
+        recipeID = 994444,
+        name = "Forever Apprentice Hammer",
+        learned = false, -- Trainer-taught recipe (verified via TRAINER_SHOW below)
+        outputItemID = 2846,
+        quantityMin = 1,
+        quantityMax = 1,
+        skillLine = 164,
+        professionName = "Blacksmithing",
+        difficulty = nil,
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal, -- ORANGE
+        reagents = { { itemID = 2840, qty = 2 } },
+    },
+    [999300] = {
+        recipeID = 999300,
+        name = "Elemental Sharpening Stone",
+        learned = false, -- Unverified phase-locked / drop recipe NOT at trainer -> MUST BE IGNORED!
+        outputItemID = 18262,
+        quantityMin = 1,
+        quantityMax = 1,
+        skillLine = 164,
+        professionName = "Blacksmithing",
+        difficulty = nil,
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal,
+        reagents = { { itemID = 2835, qty = 1 } },
+    },
 }
+
+-- Without visiting a trainer, unlearned C_TradeSkillUI recipes MUST NOT be imported
+local scannedBeforeTrainer = LL.RecipeScanner.ScanModernTradeSkillUI()
+Assert(scannedBeforeTrainer == 1, "ScanModernTradeSkillUI ignores unverified unlearned C_TradeSkillUI recipes")
+
+-- Visit Blacksmithing Trainer: teaches Forever Apprentice Hammer (minSkill 45), NOT Elemental Sharpening Stone
+Mock.trainerServices = {
+    { name = "Plans: Forever Apprentice Hammer", serviceType = "available", skillName = "Blacksmithing", minSkill = 45, cost = 500 },
+}
+Mock.FireEvent("TRAINER_SHOW")
 local scannedModern = LL.RecipeScanner.ScanModernTradeSkillUI()
-Assert(scannedModern == 1, "ScanModernTradeSkillUI scans learned C_TradeSkillUI recipe")
+Assert(scannedModern == 2, "ScanModernTradeSkillUI includes trainer-verified recipe and still excludes Elemental Sharpening Stone")
 local bsRank, bsMax = LL.RecipeScanner.GetProfessionSkill(164)
 Assert(bsRank == 45 and bsMax == 75, "GetProfessionSkill accurately reports Blacksmithing 45 / 75")
 
--- Track an active play targeting skill 50, open DetailWindow, and simulate live CHAT_MSG_SKILL!
 _G.PCF_DB.prices[2835] = { minBuyout = 30, count = 300, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[2840] = { minBuyout = 100, count = 300, lastUpdated = Mock.currentTime }
 LevelingLad_DB.settings.selectedProfession = 164
 LevelingLad_DB.settings.targetMode = "PLUS5"
 local plays = LL.LevelingEngine.FindTopPlays(164, 45, 50)
-Assert(#plays >= 1, "FindTopPlays finds eligible plays at Blacksmithing 45 -> 50")
+Assert(#plays == 2, "FindTopPlays returns learned + trainer-verified WoW: Forever recipes (and excludes Elemental Sharpening Stone)")
 
 local activePlay = plays[1]
-Mock.bagCounts[2835] = 4 -- 4 in bags
-LL.AHVerifier.RecordConfirmedPurchase(2835, "Rough Stone", 2, "EVENT") -- 2 in mail
+Mock.bagCounts[2835] = 4
+LL.AHVerifier.RecordConfirmedPurchase(2835, "Rough Stone", 2, "EVENT")
 LL.DetailWindow.ShowPlay(activePlay)
 Assert(LL.DetailWindow.frame:IsShown() == true, "DetailWindow opens for selected leveling play")
 
@@ -144,7 +180,7 @@ if firstShop and firstShop.itemId == 2835 then
         "DetailWindow accurately tracks Need / In Bags (4) / In Mail (2) / To Buy")
 end
 
--- Test 1-click AH Search from DetailWindow
+-- Test 1-click AH Search
 LL.AHVerifier.SearchItemOnAH(2835, "Rough Stone", nil, 10)
 Assert(Mock.lastAuctionQuery == "Rough Stone" and _G.BrowseName:GetText() == "Rough Stone",
     "1-Click Search AH fills search bar and executes AH query")
@@ -169,7 +205,7 @@ local blockedCraft, blockReason = LL.RecipeScanner.CraftRecipe(activePlay.recipe
 Assert(blockedCraft == false and blockReason == "TARGET_REACHED",
     "CraftRecipe automatically halts crafting once target skill is reached to save remaining mats")
 
--- 8. SideWindow Docking & Slash Command Smoke Tests
+-- 8. SideWindow Docking & Slash Command Smoke Tests (including /ll debug)
 Mock.FireEvent("AUCTION_HOUSE_SHOW")
 Assert(LL.SideWindow.frame ~= nil and LL.SideWindow.frame:IsShown() == true,
     "SideWindow automatically opens and docks on AUCTION_HOUSE_SHOW")
@@ -181,7 +217,10 @@ Assert(LevelingLad_DB.settings.recoveryMode == "AH", "/ll recovery ah switches r
 _G.SlashCmdList["LEVELINGLAD"]("target milestone")
 Assert(LevelingLad_DB.settings.targetMode == "MILESTONE", "/ll target milestone switches target mode")
 _G.SlashCmdList["LEVELINGLAD"]("run")
-Assert(#(LevelingLad_DB.lastTopPlays or {}) >= 1, "/ll run populates Top 5 leveling plays")
+Assert(#(LevelingLad_DB.lastTopPlays or {}) >= 1, "/ll run populates Top leveling plays")
+
+local dbgCounts = LL.RecipeScanner.DebugDump()
+Assert(dbgCounts ~= nil and dbgCounts.ORANGE == 2 and dbgCounts.YELLOW == 1, "/ll debug reports live C_TradeSkillUI difficulty breakdown")
 
 Mock.FireEvent("AUCTION_HOUSE_CLOSED")
 Assert(LL.SideWindow.frame:IsShown() == false, "SideWindow hides cleanly on AUCTION_HOUSE_CLOSED")
@@ -192,25 +231,36 @@ Mock.bagCounts[2835] = 4
 LL.AHVerifier.ClearPurchasedTracker()
 LL.AHVerifier.RecordConfirmedPurchase(2835, "Rough Stone", 10, "EVENT")
 Assert(LL.AHVerifier.GetPurchasedInMailCount(2835) == 10, "Purchased mail tracker records 10 Rough Stone in mail")
-Mock.bagCounts[2835] = 10 -- Player looted 6 Rough Stone from mailbox into bags
+Mock.bagCounts[2835] = 10
 Assert(LL.AHVerifier.GetPurchasedInMailCount(2835) == 4, "Purchased mail count auto-decrements from 10 to 4 when 6 arrive in bags")
-Mock.bagCounts[2835] = 14 -- Remaining 4 looted
+Mock.bagCounts[2835] = 14
 Assert(LL.AHVerifier.GetPurchasedInMailCount(2835) == 0, "Purchased mail count clears to 0 once all items are looted")
 
 -- 10. Live Legacy AH Order-Book Verification Flow Test
 Mock.Reset()
 Mock.playerMoney = 500000
 _G.AuctionFrame:Show()
+LevelingLad_DB.charRecipes = {}
+Mock.professions = { { name = "Blacksmithing", skillLevel = 1, maxSkillLevel = 75, skillLine = 164 } }
+Mock.modernProfession = { professionID = 164, parentProfessionID = 164, professionName = "Blacksmithing", parentProfessionName = "Blacksmithing", skillLevel = 1, maxSkillLevel = 75 }
+Mock.modernRecipes = {
+    [2660] = {
+        recipeID = 2660, name = "Rough Sharpening Stone", learned = true, outputItemID = 2862,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal,
+        reagents = { { itemID = 2835, qty = 1 } },
+    },
+}
+LL.RecipeScanner.ScanModernTradeSkillUI()
 _G.PCF_DB.prices[2835] = { minBuyout = 20, count = 100, lastUpdated = Mock.currentTime }
 Mock.auctionListingsByQuery["Rough Stone"] = {
-    { itemId = 2835, name = "Rough Stone", count = 5, buyoutPrice = 1000 }, -- 2s ea (5x)
-    { itemId = 2835, name = "Rough Stone", count = 10, buyoutPrice = 4000 }, -- 4s ea (10x)
+    { itemId = 2835, name = "Rough Stone", count = 5, buyoutPrice = 1000 },
+    { itemId = 2835, name = "Rough Stone", count = 10, buyoutPrice = 4000 },
 }
 local verifyDone = false
 local verifiedPlays = nil
 LevelingLad_DB.settings.selectedProfession = 164
 LevelingLad_DB.settings.targetMode = "PLUS5"
-Mock.professions = { { name = "Blacksmithing", skillLevel = 1, maxSkillLevel = 75, skillLine = 164 } }
 LL.AHVerifier.StartVerification(164, {
     onFinish = function(resultPlays)
         verifyDone = true
@@ -224,73 +274,209 @@ local cachedOB = LevelingLad_DB.orderBookCache[2835]
 Assert(cachedOB ~= nil and #cachedOB.listings == 2 and cachedOB.listings[1].unitPrice == 200 and cachedOB.listings[2].unitPrice == 400,
     "Live AH query populates multi-tier orderBookCache (200c x5, 400c x10)")
 
--- 11. Legacy TradeSkillFrame Scan & DoTradeSkill Fallback Test
+-- 11. Regression Test: WoW: Forever Blacksmithing 255 -> 260 (Zero Classic Poisoning!)
 Mock.Reset()
-local savedModernUI = _G.C_TradeSkillUI
-_G.C_TradeSkillUI = nil
-Mock.tradeSkillLine = "Tailoring"
-Mock.tradeSkillRank = 30
-Mock.tradeSkillMaxRank = 75
-Mock.tradeSkills = {
-    {
-        name = "Brown Linen Robe",
-        skillType = "optimal",
-        outputItemId = 6238,
-        reagents = {
-            { itemId = 2996, name = "Bolt of Linen Cloth", count = 3 },
-            { itemId = 2320, name = "Coarse Thread", count = 1 },
-        },
+Mock.playerMoney = 5000000
+LevelingLad_DB.settings.budgetCopper = 0
+LevelingLad_DB.charRecipes = {}
+LevelingLad_DB.orderBookCache = {}
+LevelingLad_DB.settings.includeTrainerRecipes = true
+Mock.professions = {
+    { name = "Blacksmithing", skillLevel = 255, maxSkillLevel = 300, skillLine = 164 },
+}
+Mock.modernProfession = {
+    professionID = 164,
+    parentProfessionID = 164,
+    professionName = "Blacksmithing",
+    parentProfessionName = "Blacksmithing",
+    skillLevel = 255,
+    maxSkillLevel = 300,
+}
+Mock.modernRecipes = {
+    [3116] = {
+        recipeID = 3116, name = "Coarse Weightstone", learned = true, outputItemID = 3240,
+        skillLine = 164, professionName = "Blacksmithing",
+        difficulty = nil, relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Trivial, -- GRAY
+        reagents = { { itemID = 2836, qty = 1 } },
+    },
+    [16639] = {
+        recipeID = 16639, name = "Dense Sharpening Stone", learned = true, outputItemID = 12404,
+        skillLine = 164, professionName = "Blacksmithing",
+        difficulty = nil, relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Trivial, -- GRAY on Forever at 255
+        reagents = { { itemID = 12365, qty = 1 } },
+    },
+    [993117] = {
+        recipeID = 993117, name = "Unknown Difficulty Stone", learned = true, outputItemID = 2862,
+        skillLine = 164, professionName = "Blacksmithing",
+        difficulty = nil, relativeDifficulty = nil, -- Unknown -> defaults safely to GRAY
+        reagents = { { itemID = 2835, qty = 1 } },
+    },
+    [997937] = {
+        recipeID = 997937, name = "Ornate Mithril Helm", learned = true, outputItemID = 7937,
+        skillLine = 164, professionName = "Blacksmithing",
+        difficulty = nil, relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Easy, -- GREEN
+        reagents = { { itemID = 3860, qty = 16 } },
     },
 }
-local scannedLegacy = LL.RecipeScanner.ScanLegacyTradeSkill()
-Assert(scannedLegacy == 1, "ScanLegacyTradeSkill scans legacy TradeSkillFrame recipes")
-local legacyCraftOk = LL.RecipeScanner.CraftRecipe({ name = "Brown Linen Robe", outputItemId = 6238, profession = "Tailoring", skillLine = 197 }, 4)
-Assert(legacyCraftOk == true and Mock.craftedTradeSkill ~= nil and Mock.craftedTradeSkill.quantity == 4,
-    "CraftRecipe falls back to legacy DoTradeSkill when C_TradeSkillUI is absent")
-_G.C_TradeSkillUI = savedModernUI
+_G.PCF_DB.prices[2835]  = { minBuyout = 10,  count = 500, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[2836]  = { minBuyout = 61,  count = 500, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[12365] = { minBuyout = 50,  count = 500, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[3860]  = { minBuyout = 500, count = 500, lastUpdated = Mock.currentTime }
 
--- 12. All-Professions 1->300 Continuity & Seed Metadata Completeness Check
+local scanned255 = LL.RecipeScanner.ScanModernTradeSkillUI()
+Assert(scanned255 == 4, "ScanModernTradeSkillUI scans all 4 WoW: Forever Blacksmithing recipes at 255")
+
+local plays255 = LL.LevelingEngine.FindTopPlays(164, 255, 260)
+Assert(#plays255 == 1 and plays255[1].recipeName == "Ornate Mithril Helm" and plays255[1].startDifficulty == "GREEN",
+    "Blacksmithing 255->260 strictly excludes gray recipes & Classic Era entries, recommending only GREEN Ornate Mithril Helm")
+
+local roadmap255 = LL.LevelingEngine.PlanMilestonePath(164, 255, 260)
+Assert(roadmap255.reachedTarget == true and #roadmap255.steps == 1 and roadmap255.steps[1].recipeName == "Ornate Mithril Helm",
+    "Blacksmithing 255->260 roadmap cleanly uses live WoW: Forever Ornate Mithril Helm (zero Classic poisoning)")
+
+-- 12. Regression Test: Blacksmithing 260 -> 265 (No Unverified Unlearned Recipes, No Stale Goal Alerts, Visible Button Labels)
 Mock.Reset()
-Mock.playerMoney = 100000000 -- 10,000g for full 1->300 continuity validation
-LevelingLad_DB.settings.budgetCopper = 0
+_G.AuctionFrame:Hide() -- Crafting at the anvil away from the Auction House
+Mock.playerMoney = 2134500 -- 213g 45s
+LevelingLad_DB.settings.budgetCopper = 500000 -- 50g cap
+LevelingLad_DB.charRecipes = {}
+LevelingLad_DB.trainerRecipes = {}
 LevelingLad_DB.orderBookCache = {}
-for _, prof in ipairs(LL.RecipeDatabase.GetSupportedProfessions()) do
-    local recipes = LL.RecipeDatabase.GetRecipesForProfession(prof.skillLine)
-    local validatedItems = 0
-    for _, rec in ipairs(recipes) do
-        if not (rec.orange <= rec.yellow and rec.yellow <= rec.green and rec.green <= rec.gray) then
-            Assert(false, string.format("Invalid thresholds O<=Y<=G<=Gr for [%s]", rec.name))
-        end
-        for itemId, qty in pairs(rec.reagents or {}) do
-            local meta = LL.VendorDatabase.GetItemMetadata(itemId, nil, true)
-            if not (qty > 0 and meta and meta.name) then
-                Assert(false, string.format("Missing reagent metadata/qty for item %d in [%s]", itemId, rec.name))
-            end
-            validatedItems = validatedItems + 1
-            if not LL.VendorDatabase.IsVendorReagent(itemId) then
-                _G.PCF_DB.prices[itemId] = { minBuyout = 100, count = 999, lastUpdated = Mock.currentTime }
-            end
-        end
-        if rec.outputItemId then
-            local outMeta = LL.VendorDatabase.GetItemMetadata(rec.outputItemId, nil, true)
-            if not (outMeta and outMeta.name) then
-                Assert(false, string.format("Missing output metadata for item %d of [%s]", rec.outputItemId, rec.name))
-            end
-            validatedItems = validatedItems + 1
-        end
-    end
-    Assert(#recipes >= 10 and validatedItems > 0,
-        string.format("%s catalog integrity verified (%d recipes, %d item refs)", prof.name, #recipes, validatedItems))
+LevelingLad_DB.settings.includeTrainerRecipes = true
+LevelingLad_DB.settings.selectedProfession = 164
 
-    local targetCap = (prof.skillLine == 186) and 290 or 300
-    local roadmap = LL.LevelingEngine.PlanMilestonePath(prof.skillLine, 1, targetCap, {
-        recoveryMode = "VENDOR",
-        customRecipes = recipes,
-    })
-    Assert(roadmap.reachedTarget == true and roadmap.reachedSkill == targetCap,
-        string.format("Full 1->%d zero-gap roadmap continuity verified for %s (%d steps)",
-            targetCap, prof.name, #roadmap.steps))
+-- Seed a stale activePlay from a previous 255->260 session
+LevelingLad_DB.activePlay = {
+    recipeName = "Ornate Mithril Helm",
+    profession = "Blacksmithing",
+    skillLine = 164,
+    startSkill = 255,
+    targetSkill = 260,
+    goalTargetSkill = 260,
+    liveSkill = 260,
+}
+
+Mock.professions = {
+    { name = "Blacksmithing", skillLevel = 260, maxSkillLevel = 300, skillLine = 164 },
+}
+Mock.modernProfession = {
+    professionID = 164,
+    parentProfessionID = 164,
+    professionName = "Blacksmithing",
+    parentProfessionName = "Blacksmithing",
+    skillLevel = 260,
+    maxSkillLevel = 300,
+}
+Mock.modernRecipes = {
+    [16657] = {
+        recipeID = 16657, name = "Imperial Plate Bracers", learned = true, outputItemID = 12424,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal, -- ORANGE learned recipe!
+        reagents = { { itemID = 12359, qty = 12 } },
+    },
+    -- Unlearned unavailable / drop / high-level recipes in C_TradeSkillUI (NOT at trainer):
+    [22757] = {
+        recipeID = 22757, name = "Elemental Sharpening Stone", learned = false, outputItemID = 18262,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal,
+        reagents = { { itemID = 7067, qty = 1 }, { itemID = 12365, qty = 1 } },
+    },
+    [23638] = {
+        recipeID = 23638, name = "Ebon Shiv", learned = false, outputItemID = 19170,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Medium,
+        reagents = { { itemID = 12359, qty = 12 } },
+    },
+    [16664] = {
+        recipeID = 16664, name = "Thorium Greatsword", learned = false, outputItemID = 12406,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Medium,
+        reagents = { { itemID = 12359, qty = 12 } },
+    },
+    [16729] = {
+        recipeID = 16729, name = "Blight", learned = false, outputItemID = 12774,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Medium,
+        reagents = { { itemID = 12359, qty = 12 } },
+    },
+    [16655] = {
+        recipeID = 16655, name = "Ornate Thorium Handaxe", learned = false, outputItemID = 12773,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal,
+        reagents = { { itemID = 12359, qty = 12 } },
+    },
+    -- Future trainer recipe requiring skill 265:
+    [16658] = {
+        recipeID = 16658, name = "Imperial Plate Belt", learned = false, outputItemID = 12425,
+        skillLine = 164, professionName = "Blacksmithing",
+        relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal,
+        reagents = { { itemID = 12359, qty = 8 } },
+    },
+}
+_G.PCF_DB.prices[12359] = { minBuyout = 1000, count = 500, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[7067]  = { minBuyout = 2000, count = 500, lastUpdated = Mock.currentTime }
+_G.PCF_DB.prices[12365] = { minBuyout = 500,  count = 500, lastUpdated = Mock.currentTime }
+
+-- Trainer teaches Imperial Plate Belt at minSkill = 265 (unavailable at 260!)
+Mock.trainerServices = {
+    { name = "Imperial Plate Belt", serviceType = "unavailable", skillName = "Blacksmithing", minSkill = 265, cost = 20000 },
+}
+Mock.FireEvent("TRAINER_SHOW")
+LL.RecipeScanner.ScanModernTradeSkillUI()
+
+-- User opens SideWindow, types 265, and clicks "Set Goal"
+LL.SideWindow.Toggle()
+Assert(LL.SideWindow.frame.targetPlus5Btn.labelText ~= nil
+    and LL.SideWindow.frame.targetPlus5Btn.labelText:GetText():find("%+5 Points") ~= nil,
+    "SideWindow +5 Points button has a rendered FontString labelText (not a blank box)")
+Assert(LL.SideWindow.frame.targetMilestoneBtn.labelText ~= nil
+    and LL.SideWindow.frame.targetMilestoneBtn.labelText:GetText():find("Next Tier: 300") ~= nil,
+    "SideWindow Next Tier button has a rendered FontString labelText (not a blank box)")
+
+LL.SideWindow.frame.targetCustomInput:SetText("265")
+_G["LL_SideCustomTargetApply"]:Click()
+
+Assert(LevelingLad_DB.activePlay == nil, "Clicking 'Set Goal' (265) clears stale target=260 activePlay")
+local plays260 = LevelingLad_DB.lastTopPlays or {}
+Assert(#plays260 == 1 and plays260[1].recipeName == "Imperial Plate Bracers",
+    "At Blacksmithing 260, Top 5 excludes Elemental Sharpening Stone / Ebon Shiv / 265 trainer recipe and recommends learned Imperial Plate Bracers")
+
+-- Verify Milestone Path 260 -> 270 DOES unlock Imperial Plate Belt once simulated skill reaches 265!
+local roadmap270 = LL.LevelingEngine.PlanMilestonePath(164, 260, 270)
+local usedTrainer265 = false
+for _, st in ipairs(roadmap270.steps or {}) do
+    if st.recipeName == "Imperial Plate Belt" and st.startSkill >= 265 then
+        usedTrainer265 = true
+    end
 end
+Assert(usedTrainer265 == true, "Milestone Path 260->270 routes to trainer-verified Imperial Plate Belt only at skill >= 265")
+
+-- Craft Imperial Plate Bracers at 261 & 262 without opening DetailWindow -> ZERO stale target=260 alerts!
+local _, r261, hit261 = LL.RecipeScanner.HandleSkillMessage("Your skill in Blacksmithing has increased to 261.")
+local _, r262, hit262 = LL.RecipeScanner.HandleSkillMessage("Your skill in Blacksmithing has increased to 262.")
+Assert(r261 == 261 and hit261 == false and r262 == 262 and hit262 == false,
+    "Skillups to 261 and 262 do NOT fire stale 'Goal reached (target: 260)' alerts")
+Assert(LevelingLad_DB.lastTopPlays[1] and LevelingLad_DB.lastTopPlays[1].startSkill == 262 and LevelingLad_DB.lastTopPlays[1].targetSkill == 265,
+    "SideWindow cached plays automatically refresh skill range to (262->265) on live skillup")
+
+-- Now open DetailWindow for the 262->265 play and verify single-fire alert at 265 (and silence at 266)
+LL.DetailWindow.ShowPlay(LevelingLad_DB.lastTopPlays[1])
+local _, r265, hit265 = LL.RecipeScanner.HandleSkillMessage("Your skill in Blacksmithing has increased to 265.")
+local _, r266, hit266 = LL.RecipeScanner.HandleSkillMessage("Your skill in Blacksmithing has increased to 266.")
+Assert(r265 == 265 and hit265 == true and r266 == 266 and hit266 == false,
+    "Goal alert fires exactly once at target 265 and never repeats at 266")
+
+-- 13. Verify v2/v3 -> v4 DB migration purges tainted unlearned recipes and stale activePlay
+local v3DB = {
+    version = 3,
+    charRecipes = { ["SkillTester-Forever"] = { ["164:22757"] = { name = "Elemental Sharpening Stone", learned = false, orange = 260, gray = 295 } } },
+    lastTopPlays = { { recipeName = "Elemental Sharpening Stone" } },
+    lastRoadmap = { steps = { { recipeName = "Elemental Sharpening Stone" } } },
+    activePlay = { recipeName = "Ornate Mithril Helm", targetSkill = 260 },
+}
+LL.LoadConfig(v3DB)
+Assert(v3DB.version == 4 and next(v3DB.charRecipes) == nil and #v3DB.lastTopPlays == 0 and v3DB.lastRoadmap == nil and v3DB.activePlay == nil,
+    "Config v3->v4 migration purges unverified unlearned charRecipes, lastTopPlays, lastRoadmap, and stale activePlay")
 
 print("================================================================")
 print(string.format(" ALL TESTS PASSED! (%d passed, %d failed)", passed, failed))

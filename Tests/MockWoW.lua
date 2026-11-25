@@ -35,6 +35,7 @@ local Mock = {
     craftedTradeSkill = nil,
     placedBids = {},
     merchantItems = {},
+    trainerServices = {}, -- { { name, serviceType, skillName, minSkill, cost, itemLink }, ... }
     depositRate = 5,
     inCombat = false,
     frames = {},
@@ -346,6 +347,39 @@ _G.CastSpellByName = function(spellName)
     table.insert(Mock.castSpells, spellName)
 end
 
+-- Profession Trainer Mock API
+_G.GetNumTrainerServices = function()
+    return #Mock.trainerServices
+end
+_G.GetTrainerServiceInfo = function(index)
+    local svc = Mock.trainerServices[index]
+    if not svc then return nil end
+    return svc.name, svc.subText or "", svc.serviceType or "available", svc.texture or "", 0
+end
+_G.GetTrainerServiceSkillReq = function(index)
+    local svc = Mock.trainerServices[index]
+    if not svc then return nil end
+    return svc.skillName or "Blacksmithing", svc.minSkill or 1
+end
+_G.GetTrainerServiceCost = function(index)
+    local svc = Mock.trainerServices[index]
+    if not svc then return 0, 0, 0 end
+    return svc.cost or 0, 0, 0
+end
+_G.GetTrainerServiceItemLink = function(index)
+    local svc = Mock.trainerServices[index]
+    if not svc then return nil end
+    return svc.itemLink
+end
+
+_G.Enum = _G.Enum or {}
+_G.Enum.TradeskillRelativeDifficulty = {
+    Optimal = 0,
+    Medium  = 1,
+    Easy    = 2,
+    Trivial = 3,
+}
+
 -- Modern C_TradeSkillUI Mock API
 _G.C_TradeSkillUI = {
     IsTradeSkillReady = function() return true end,
@@ -374,8 +408,13 @@ _G.C_TradeSkillUI = {
             name = r.name,
             learned = (r.learned ~= false),
             itemID = r.outputItemID,
-            difficulty = r.difficulty or "optimal",
-            relativeDifficulty = r.relativeDifficulty or 1,
+            difficulty = r.difficulty,
+            relativeDifficulty = r.relativeDifficulty,
+            numSkillUps = r.numSkillUps,
+            isRecraft = r.isRecraft,
+            isDummyRecipe = r.isDummyRecipe,
+            isGatheringRecipe = r.isGatheringRecipe,
+            isSalvageRecipe = r.isSalvageRecipe,
         }
     end,
     GetRecipeSchematic = function(recipeID)
@@ -503,6 +542,7 @@ function Mock.Reset()
     Mock.craftedTradeSkill = nil
     Mock.placedBids = {}
     Mock.merchantItems = {}
+    Mock.trainerServices = {}
     Mock.depositRate = 5
     Mock.inCombat = false
     _G.AuctionFrame:Show()

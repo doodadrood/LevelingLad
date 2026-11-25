@@ -14,6 +14,12 @@ function LL.LevelingEngine.GetDifficultyState(recipe, skill)
     if type(recipe) ~= "table" or type(skill) ~= "number" then
         return "GRAY"
     end
+    -- Authoritative live-scan guard: if Blizzard reported this recipe as GRAY (Trivial) at or below
+    -- `skill`, it can never grant skillups at `skill` or higher.
+    if recipe.liveDifficulty == "GRAY" and type(recipe.scannedAtRank) == "number" and skill >= recipe.scannedAtRank then
+        return "GRAY"
+    end
+
     local gray = recipe.gray or 0
     local green = recipe.green or gray
     local yellow = recipe.yellow or green
@@ -638,6 +644,7 @@ function LL.LevelingEngine.EvaluateCandidatePlay(recipe, currentSkill, targetSki
                     icon = LL.Formatter.GetItemIcon(recipe.outputItemId),
                     startSkill = currentSkill,
                     targetSkill = actualEnd,
+                    goalTargetSkill = targetSkill,
                     liveSkill = currentSkill,
                     pointsGained = pointsGained,
                     expectedCrafts = expectedCrafts,
@@ -693,7 +700,8 @@ function LL.LevelingEngine.FormatPlaySummary(rank, play)
     local badge = LL.Formatter.FormatDifficultyBadge(play.startDifficulty, play.endDifficulty)
     local cpspStr = LL.Formatter.FormatNetCost(play.cpspRounded or play.cpsp, true)
     local totalStr = LL.Formatter.FormatNetCost(play.netCost, true)
-    local trainerTag = play.needsTrainer and " |cff00ccff[Trainer]|r" or ""
+    local trainerLabel = (play.source and play.source ~= "" and play.source ~= "Known") and play.source or "Trainer"
+    local trainerTag = play.needsTrainer and string.format(" |cff00ccff[%s]|r", trainerLabel) or ""
     return string.format(
         "#%d %s — Craft %dx (%d->%d) %s | %s/pt (Total: %s)%s",
         rank or 1,
@@ -794,8 +802,11 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
     local remainingBudget = initialBudget
     local virtualOrderBooks = options.customOrderBooks and DeepCloneOrderBooks(options.customOrderBooks) or nil
 
+    local settings = (LevelingLad_DB and LevelingLad_DB.settings) or {}
+    local includeTrainer = (options.includeTrainerRecipes ~= nil) and options.includeTrainerRecipes or (settings.includeTrainerRecipes ~= false)
+
     local candidates = options.customRecipes
-        or (LL.RecipeScanner and LL.RecipeScanner.GetRecipesForProfession and LL.RecipeScanner.GetRecipesForProfession(skillLine, true))
+        or (LL.RecipeScanner and LL.RecipeScanner.GetRecipesForProfession and LL.RecipeScanner.GetRecipesForProfession(skillLine, includeTrainer))
         or LL.RecipeDatabase.GetRecipesForProfession(skillLine)
 
     local steps = {}
@@ -817,7 +828,7 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
             customOrderBooks = virtualOrderBooks,
             recoveryMode = options.recoveryMode,
             riskTolerance = options.riskTolerance,
-            includeTrainerRecipes = true,
+            includeTrainerRecipes = includeTrainer,
             includeVendorArbitrage = options.includeVendorArbitrage,
             ignoreInventory = (options.ignoreInventory ~= false), -- Roadmap tracks full materials required across chained steps
             customRecipes = candidates,
@@ -833,7 +844,7 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
                 customOrderBooks = virtualOrderBooks,
                 recoveryMode = options.recoveryMode,
                 riskTolerance = options.riskTolerance,
-                includeTrainerRecipes = true,
+                includeTrainerRecipes = includeTrainer,
                 includeVendorArbitrage = options.includeVendorArbitrage,
                 ignoreInventory = true,
                 customRecipes = candidates,

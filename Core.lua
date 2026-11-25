@@ -87,16 +87,19 @@ local function RegisterSlashCommands()
             if arg == "+5" or arg == "plus5" then
                 LevelingLad_DB.settings.targetMode = "PLUS5"
                 LevelingLad_DB.settings.targetSkillRank = 0
+                if LL.SyncActivePlayWithGoal then LL.SyncActivePlayWithGoal() end
                 print("|cff00ccff[Leveling Lad]|r Target mode set to +5 skill points.")
                 LL.SideWindow.RunSearch()
             elseif arg == "+10" or arg == "plus10" then
                 LevelingLad_DB.settings.targetMode = "PLUS10"
                 LevelingLad_DB.settings.targetSkillRank = 0
+                if LL.SyncActivePlayWithGoal then LL.SyncActivePlayWithGoal() end
                 print("|cff00ccff[Leveling Lad]|r Target mode set to +10 skill points.")
                 LL.SideWindow.RunSearch()
             elseif arg == "milestone" or arg == "next" then
                 LevelingLad_DB.settings.targetMode = "MILESTONE"
                 LevelingLad_DB.settings.targetSkillRank = 0
+                if LL.SyncActivePlayWithGoal then LL.SyncActivePlayWithGoal() end
                 print("|cff00ccff[Leveling Lad]|r Target mode set to Next Milestone (75/150/225/300).")
                 LL.SideWindow.RunSearch()
             elseif tonumber(arg) then
@@ -104,6 +107,7 @@ local function RegisterSlashCommands()
                 LevelingLad_DB.settings.targetMode = "CUSTOM"
                 LevelingLad_DB.settings.customTargetSkill = n
                 LevelingLad_DB.settings.targetSkillRank = n
+                if LL.SyncActivePlayWithGoal then LL.SyncActivePlayWithGoal(n) end
                 print(string.format("|cff00ccff[Leveling Lad]|r Target skill set to %d.", n))
                 LL.SideWindow.RunSearch()
             else
@@ -122,10 +126,15 @@ local function RegisterSlashCommands()
             local skillLine = LL.RecipeDatabase.ResolveSkillLineId(arg)
             if skillLine then
                 LevelingLad_DB.settings.selectedProfession = skillLine
+                if LL.SyncActivePlayWithGoal then LL.SyncActivePlayWithGoal() end
                 print(string.format("|cff00ccff[Leveling Lad]|r Selected profession: %s.", LL.RecipeDatabase.GetProfessionName(skillLine)))
                 LL.SideWindow.RunSearch()
             else
                 print("|cffff5555[Leveling Lad]|r Unknown profession. Try: blacksmithing, tailoring, leatherworking, alchemy, engineering, cooking, enchanting, first aid.")
+            end
+        elseif cmd == "debug" then
+            if LL.RecipeScanner and LL.RecipeScanner.DebugDump then
+                LL.RecipeScanner.DebugDump()
             end
         elseif cmd == "scan" then
             local status = LL.GetAHDataStatus and LL.GetAHDataStatus() or "FRESH"
@@ -145,6 +154,7 @@ local function RegisterSlashCommands()
             print("  /ll recovery X       - Set resale recovery strategy (vendor, ah, none)")
             print("  /ll prof <name>      - Select profession to optimize")
             print("  /ll scan             - Scan AH (when open) or recalculate plays")
+            print("  /ll debug            - Dump live WoW: Forever C_TradeSkillUI recipe difficulty info")
         end
     end
 end
