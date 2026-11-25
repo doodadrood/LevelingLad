@@ -46,12 +46,26 @@ local function RegisterSlashCommands()
             LL.SideWindow.Toggle()
         elseif cmd == "run" or cmd == "find" then
             local plays = LL.SideWindow.RunSearch()
-            print(string.format("|cff00ccff[Leveling Lad]|r Top %d cheapest leveling plays:", #(plays or {})))
-            for i, p in ipairs(plays or {}) do
-                print("  " .. (p.summaryLine or LL.LevelingEngine.FormatPlaySummary(i, p)))
+            if #(plays or {}) > 0 then
+                print(string.format("|cff00ccff[Leveling Lad]|r Top %d cheapest leveling plays:", #(plays or {})))
+                for i, p in ipairs(plays or {}) do
+                    print("  " .. (p.summaryLine or LL.LevelingEngine.FormatPlaySummary(i, p)))
+                end
+            else
+                local active = LL.RecipeScanner.GetActiveProfession()
+                local scanStatus = LL.RecipeScanner.GetProfessionScanStatus and LL.RecipeScanner.GetProfessionScanStatus(active.skillLine) or "READY"
+                if scanStatus ~= "READY" then
+                    print(string.format("|cffffcc00[Leveling Lad]|r Open %s first so Leveling Lad can scan live orange/yellow/green recipes!", active.name or "Profession"))
+                end
             end
         elseif cmd == "roadmap" or cmd == "plan" then
             local active = LL.RecipeScanner.GetActiveProfession()
+            local scanStatus = LL.RecipeScanner.GetProfessionScanStatus and LL.RecipeScanner.GetProfessionScanStatus(active.skillLine) or "READY"
+            if scanStatus ~= "READY" then
+                print(string.format("|cffffcc00[Leveling Lad]|r Open %s first to scan live WoW: Forever recipes before building a Milestone Path.", active.name or "Profession"))
+                LL.SideWindow.TriggerProfessionScan()
+                return
+            end
             local customGoal = tonumber(arg)
             local goal = LL.GetTargetSkill(active.rank, active.maxRank, customGoal)
             local roadmap = LL.LevelingEngine.PlanMilestonePath(active.skillLine, active.rank, goal)
@@ -72,6 +86,51 @@ local function RegisterSlashCommands()
             local idx = tonumber(cmd) or tonumber(arg) or 1
             if not LL_API.ShowPlay(idx) then
                 print(string.format("|cffff5555[Leveling Lad]|r Play #%d not found. Run /ll run first.", idx))
+            end
+        elseif cmd == "options" or cmd == "settings" or cmd == "config" then
+            LL.SideWindow.ToggleSettingsWindow()
+        elseif cmd == "source" or cmd == "pricesource" then
+            if not arg or arg == "" then
+                local mode = (LL.GetPriceSourceMode and LL.GetPriceSourceMode()) or "AUTO"
+                local _, info = LL.GetAHDataStatus()
+                print(string.format(
+                    "|cff00ccff[Leveling Lad]|r Price Data Source: %s (Active: %s, %d items). Use '/ll source auto', '/ll source pcf', or '/ll source auctionator'.",
+                    mode, (info and info.activeSource) or "None", (info and info.itemCount) or 0
+                ))
+            else
+                LL.SideWindow.SetPriceSource(arg)
+            end
+        elseif cmd == "autoopen" then
+            LevelingLad_DB.settings.showSideWindow = not (LevelingLad_DB.settings.showSideWindow == true)
+            LL.SideWindow.RefreshSettingsControls()
+            print(string.format("|cff00ccff[Leveling Lad]|r Auto-Open Side Window at AH: %s", LevelingLad_DB.settings.showSideWindow and "ON" or "OFF"))
+        elseif cmd == "minimap" then
+            local curHidden = LevelingLad_DB.settings.minimap and LevelingLad_DB.settings.minimap.hide == true
+            local nowShown = LL.SideWindow.SetMinimapButtonShown(curHidden)
+            print(string.format("|cff00ccff[Leveling Lad]|r Minimap Button: %s", nowShown and "SHOWN" or "HIDDEN"))
+        elseif cmd == "buyout" or cmd == "buyoutonly" then
+            LevelingLad_DB.settings.buyoutOnly = not (LevelingLad_DB.settings.buyoutOnly ~= false)
+            LL.SideWindow.ApplyFilterChange()
+            print(string.format("|cff00ccff[Leveling Lad]|r Buyout Only (Exclude Bid-Only Auctions): %s", LevelingLad_DB.settings.buyoutOnly and "ON" or "OFF"))
+        elseif cmd == "snooze" or cmd == "hidden" or cmd == "snoozed" then
+            LL.SideWindow.ToggleSnoozedWindow()
+        elseif cmd == "clearhidden" or cmd == "clearsnooze" then
+            local cleared = (LL.ClearAllSnoozedPlays and LL.ClearAllSnoozedPlays()) or 0
+            LL.SideWindow.ApplySnoozeChange()
+            print(string.format("|cff00ccff[Leveling Lad]|r Restored %d snoozed/hidden plays.", cleared))
+        elseif cmd == "unhide" or cmd == "unsnooze" then
+            if not arg or arg == "" or arg == "all" then
+                local cleared = (LL.ClearAllSnoozedPlays and LL.ClearAllSnoozedPlays()) or 0
+                LL.SideWindow.ApplySnoozeChange()
+                print(string.format("|cff00ccff[Leveling Lad]|r Restored %d snoozed/hidden plays.", cleared))
+            else
+                local removed, entry = LL.UnsnoozePlay(arg)
+                if removed then
+                    LL.SideWindow.ApplySnoozeChange()
+                    print(string.format("|cff00ccff[Leveling Lad]|r Restored %s.", (entry and (entry.itemLink or entry.itemName)) or arg))
+                else
+                    print(string.format("|cffff9900[Leveling Lad]|r No snoozed play matched '%s'. Use '/ll hidden' to view or '/ll unhide all'.", arg))
+                end
             end
         elseif cmd == "budget" then
             if not arg or arg == "" then
@@ -149,6 +208,11 @@ local function RegisterSlashCommands()
             print("  /ll run              - Calculate and display Top 5 cheapest leveling plays")
             print("  /ll roadmap [target] - Plan a multi-step milestone path (e.g. 1->75)")
             print("  /ll detail N         - Open the shopping & crafting tracker for play #1-#5")
+            print("  /ll options          - Open Options, Price Source & Snoozed Plays panel")
+            print("  /ll source X         - Set price source: auto (freshest), pcf, or auctionator")
+            print("  /ll autoopen         - Toggle auto-opening Leveling Lad when visiting the AH")
+            print("  /ll minimap          - Show or hide the Minimap button")
+            print("  /ll hidden           - View & restore snoozed Top 5 plays (or '/ll unhide all')")
             print("  /ll budget X         - Cap leveling budget (e.g. '/ll budget 25g' or 'auto')")
             print("  /ll target X         - Set goal (+5, +10, milestone, or skill rank 1-300)")
             print("  /ll recovery X       - Set resale recovery strategy (vendor, ah, none)")
@@ -183,6 +247,17 @@ local function ConfigureEmbeddedPCF()
             _G.PCF.LoadConfig(LevelingLad_DB.embeddedPCF)
         end
     end
+
+    local sourceMode = (LL.GetPriceSourceMode and LL.GetPriceSourceMode()) or "AUTO"
+    if _G.PCF_DB and type(_G.PCF_DB.settings) == "table" and not _G.PCF_DB.settings.userSetScanButton then
+        local desiredShow = (sourceMode ~= "AUCTIONATOR")
+        if _G.PCF_DB.settings.showScanButton ~= desiredShow then
+            _G.PCF_DB.settings.showScanButton = desiredShow
+            if _G.PCF and _G.PCF.Scanner and type(_G.PCF.Scanner.UpdateVisibility) == "function" then
+                _G.PCF.Scanner.UpdateVisibility()
+            end
+        end
+    end
 end
 
 function LL.Initialize()
@@ -195,6 +270,9 @@ function LL.Initialize()
     ConfigureEmbeddedPCF()
     if LL.VendorDatabase and LL.VendorDatabase.Init then
         LL.VendorDatabase.Init()
+    end
+    if LL.AuctionatorSource and LL.AuctionatorSource.Init then
+        LL.AuctionatorSource.Init()
     end
     if LL.RecipeScanner and LL.RecipeScanner.Init then
         LL.RecipeScanner.Init()
@@ -210,7 +288,7 @@ function LL.Initialize()
     end
 
     RegisterSlashCommands()
-    print("|cff00ccffLeveling Lad (LL) loaded.|r Open the Auction House or type /ll to find the cheapest leveling plays.")
+    print("|cff00ccffLeveling Lad (LL) loaded.|r Click 'Leveling Lad' on the top-left of the Auction House or type /ll to find the cheapest leveling plays.")
     return true
 end
 

@@ -25,7 +25,7 @@ _G.LevelingLad_DB = LevelingLad_DB
 local MILESTONES = { 75, 150, 225, 300 }
 
 local defaultConfig = {
-    version = 4,
+    version = 5,
     settings = {
         enabled = true,
         budgetCopper = 0,                    -- 0 = unlimited (uses full character gold); >0 = hard gold cap in copper
@@ -44,12 +44,17 @@ local defaultConfig = {
         topCount = 5,                        -- Number of top plays to display in Side Window
         verifyCandidateCount = 10,           -- Number of top candidates to live-verify at AH
         maxCalculationSeconds = 90,          -- Max seconds for live AH verification loop
-        showSideWindow = true,               -- Auto-show docked Side Window when opening AH
+        showSideWindow = false,              -- Closed by default at AH; open via top-left AH button, Minimap, or /ll
+        priceSource = "AUTO",                -- "AUTO" (freshest of PCF/Auctionator), "PCF", or "AUCTIONATOR"
+        minimap = { hide = false, minimapPos = 195 }, -- LibDBIcon-1.0 / OneForAll compatible minimap button state
+        snoozeDurationSeconds = 86400,       -- Default manual snooze duration (24 hours)
+        autoScanProfession = true,           -- Sync active TradeSkill window automatically on user-initiated actions
         onboardingDismissed = false,         -- Show welcome/AH-scan popup until dismissed
         staleDataThresholdSeconds = 86400,   -- Warn when cached AH data is older than 24 hours
     },
     charRecipes = {},        -- [charKey] = { [recipeKey] = recipeTable }
     charSkills = {},         -- [charKey] = { [skillLine] = { name, rank, maxRank, skillLine } }
+    charProfScans = {},      -- [charKey] = { [skillLine] = { scannedAt, scannedRank, recipeCount, needsRescan } }
     trainerRecipes = {},     -- [skillLine] = { [nameLower] = { name, minSkill, trainerCost, outputItemId } }
     vendorBuyPrices = {},    -- [itemId] = copperPrice (dynamically updated from MERCHANT_SHOW)
     itemCache = {},          -- [itemId] = { name, link, quality, itemLevel, classID, subClassID, invType, texture, vendorSell }
@@ -58,6 +63,7 @@ local defaultConfig = {
     lastRoadmap = nil,       -- Cached multi-step milestone roadmap
     activePlay = nil,        -- Currently tracked play in DetailWindow
     purchasedInMail = {},    -- [charKey] = { [itemId] = { count, spentCopper, updatedAt, lastBagCount } }
+    snoozedPlays = {},       -- [snoozeKey] = { key, recipeId, outputItemId, itemName, itemLink, profession, skillLine, snoozedAt, expiresAt, reason }
 }
 
 local function ApplyDefaults(target, defaults)
@@ -256,25 +262,324 @@ function LL.FormatAgeShort(ageSeconds)
     return "0m"
 end
 
+function LL.GetPriceSourceMode()
+    local raw = LevelingLad_DB and LevelingLad_DB.settings and LevelingLad_DB.settings.priceSource
+    if type(raw) == "string" then
+        local upper = raw:upper()
+        if upper == "PCF" or upper == "AUCTIONATOR" or upper == "AUTO" then
+            return upper
+        end
+    end
+    return "AUTO"
+end
+
+-- ============================================================================
+-- Manual Play Snoozing (hides snoozed recipes from Top 5; Milestone Path keeps full catalog)
+-- ============================================================================
+
+function LL.GetSnoozeKey(playOrRecipe)
+    if type(playOrRecipe) == "string" and playOrRecipe ~= "" then
+        return playOrRecipe
+    end
+    if type(playOrRecipe) == "number" and playOrRecipe > 0 then
+        return "RECIPE:" .. tostring(math.floor(playOrRecipe))
+    end
+    if type(playOrRecipe) ~= "table" then
+        return nil
+    end
+
+    local rId = playOrRecipe.recipeId or (playOrRecipe.recipe and playOrRecipe.recipe.recipeId)
+    if type(rId) == "number" and rId > 0 then
+        return "RECIPE:" .. tostring(math.floor(rId))
+    end
+
+    local outId = playOrRecipe.outputItemId or (playOrRecipe.recipe and playOrRecipe.recipe.outputItemId)
+    if type(outId) == "number" and outId > 0 then
+        return "ITEM:" .. tostring(math.floor(outId))
+    end
+
+    local rName = playOrRecipe.recipeName or playOrRecipe.name or (playOrRecipe.recipe and playOrRecipe.recipe.name)
+    local sLine = playOrRecipe.skillLine or (playOrRecipe.recipe and playOrRecipe.recipe.skillLine) or 0
+    if type(rName) == "string" and rName ~= "" then
+        return string.format("NAME:%s:%s", tostring(sLine), rName:lower())
+    end
+    return nil
+end
+
+function LL.PruneExpiredSnoozes(nowOverride)
+    if not LevelingLad_DB or type(LevelingLad_DB.snoozedPlays) ~= "table" then
+        return 0
+    end
+    local now = (type(nowOverride) == "number") and nowOverride or ((_G.time and _G.time()) or 0)
+    local pruned = 0
+    for key, entry in pairs(LevelingLad_DB.snoozedPlays) do
+        if type(entry) ~= "table" then
+            LevelingLad_DB.snoozedPlays[key] = nil
+            pruned = pruned + 1
+        elseif type(entry.expiresAt) == "number" and entry.expiresAt > 0 and now >= entry.expiresAt then
+            LevelingLad_DB.snoozedPlays[key] = nil
+            pruned = pruned + 1
+        end
+    end
+    return pruned
+end
+
+function LL.IsPlaySnoozed(playOrRecipe, nowOverride)
+    local snoozed = LevelingLad_DB and LevelingLad_DB.snoozedPlays
+    if type(snoozed) ~= "table" or next(snoozed) == nil then
+        return false, nil
+    end
+    local key = LL.GetSnoozeKey(playOrRecipe)
+    local entry = key and snoozed[key] or nil
+    if not entry and type(playOrRecipe) == "table" then
+        local outId = playOrRecipe.outputItemId or (playOrRecipe.recipe and playOrRecipe.recipe.outputItemId)
+        if type(outId) == "number" and outId > 0 then
+            entry = snoozed["ITEM:" .. tostring(math.floor(outId))]
+        end
+    end
+    if type(entry) ~= "table" then
+        return false, nil
+    end
+    local now = (type(nowOverride) == "number") and nowOverride or ((_G.time and _G.time()) or 0)
+    if type(entry.expiresAt) == "number" and entry.expiresAt > 0 and now >= entry.expiresAt then
+        snoozed[entry.key or key] = nil
+        return false, nil
+    end
+    return true, entry
+end
+
+-- Snoozes a leveling play/recipe for durationSeconds (nil -> default 24h; 0 -> permanent).
+function LL.SnoozePlay(playOrRecipe, durationSeconds, reason)
+    local key = LL.GetSnoozeKey(playOrRecipe)
+    if not key then
+        return nil
+    end
+    LevelingLad_DB = LevelingLad_DB or {}
+    LevelingLad_DB.snoozedPlays = LevelingLad_DB.snoozedPlays or {}
+
+    local now = (_G.time and _G.time()) or 0
+    local defaultDur = (LevelingLad_DB.settings and tonumber(LevelingLad_DB.settings.snoozeDurationSeconds)) or 86400
+    local dur = (durationSeconds == nil) and defaultDur or math.max(0, math.floor(tonumber(durationSeconds) or 0))
+    local expiresAt = (dur > 0) and (now + dur) or 0
+
+    local rId = (type(playOrRecipe) == "table") and (playOrRecipe.recipeId or (playOrRecipe.recipe and playOrRecipe.recipe.recipeId)) or nil
+    local outId = (type(playOrRecipe) == "table") and (playOrRecipe.outputItemId or (playOrRecipe.recipe and playOrRecipe.recipe.outputItemId)) or nil
+    local itemName = (type(playOrRecipe) == "table") and (playOrRecipe.recipeName or playOrRecipe.name or (playOrRecipe.recipe and playOrRecipe.recipe.name)) or nil
+    local itemLink = (type(playOrRecipe) == "table") and (playOrRecipe.outputLink or playOrRecipe.itemLink) or nil
+    local profession = (type(playOrRecipe) == "table") and (playOrRecipe.profession or (playOrRecipe.recipe and playOrRecipe.recipe.profession)) or nil
+    local skillLine = (type(playOrRecipe) == "table") and (playOrRecipe.skillLine or (playOrRecipe.recipe and playOrRecipe.recipe.skillLine)) or nil
+
+    if not itemName and outId and LL.VendorDatabase and LL.VendorDatabase.GetItemMetadata then
+        local meta = LL.VendorDatabase.GetItemMetadata(outId, itemLink, true)
+        itemName = meta and meta.name
+    end
+
+    local entry = {
+        key = key,
+        recipeId = rId,
+        outputItemId = outId,
+        itemId = outId,
+        itemName = itemName or key,
+        itemLink = itemLink,
+        profession = profession,
+        skillLine = skillLine,
+        snoozedAt = now,
+        expiresAt = expiresAt,
+        durationSeconds = dur,
+        reason = reason or ((dur == 0) and "permanent" or "manual"),
+    }
+    LevelingLad_DB.snoozedPlays[key] = entry
+    return entry
+end
+
+function LL.UnsnoozePlay(keyOrQuery)
+    if not LevelingLad_DB or type(LevelingLad_DB.snoozedPlays) ~= "table" or keyOrQuery == nil then
+        return false, nil
+    end
+    if type(keyOrQuery) == "number" then
+        local n = math.floor(keyOrQuery)
+        local k1 = "RECIPE:" .. tostring(n)
+        local k2 = "ITEM:" .. tostring(n)
+        if LevelingLad_DB.snoozedPlays[k1] then
+            local removed = LevelingLad_DB.snoozedPlays[k1]
+            LevelingLad_DB.snoozedPlays[k1] = nil
+            return true, removed
+        elseif LevelingLad_DB.snoozedPlays[k2] then
+            local removed = LevelingLad_DB.snoozedPlays[k2]
+            LevelingLad_DB.snoozedPlays[k2] = nil
+            return true, removed
+        end
+        for k, entry in pairs(LevelingLad_DB.snoozedPlays) do
+            if type(entry) == "table" and (entry.recipeId == n or entry.outputItemId == n) then
+                LevelingLad_DB.snoozedPlays[k] = nil
+                return true, entry
+            end
+        end
+        return false, nil
+    end
+    if type(keyOrQuery) == "string" then
+        if LevelingLad_DB.snoozedPlays[keyOrQuery] then
+            local removed = LevelingLad_DB.snoozedPlays[keyOrQuery]
+            LevelingLad_DB.snoozedPlays[keyOrQuery] = nil
+            return true, removed
+        end
+        local asNum = tonumber(keyOrQuery)
+        if asNum then
+            local okNum, remNum = LL.UnsnoozePlay(asNum)
+            if okNum then return true, remNum end
+        end
+        local needle = keyOrQuery:lower():match("^%s*(.-)%s*$") or ""
+        if needle ~= "" then
+            for k, entry in pairs(LevelingLad_DB.snoozedPlays) do
+                local name = (type(entry) == "table" and type(entry.itemName) == "string" and entry.itemName:lower()) or ""
+                if name ~= "" and name:find(needle, 1, true) then
+                    LevelingLad_DB.snoozedPlays[k] = nil
+                    return true, entry
+                end
+            end
+        end
+    end
+    return false, nil
+end
+
+function LL.ClearAllSnoozedPlays()
+    if not LevelingLad_DB or type(LevelingLad_DB.snoozedPlays) ~= "table" then
+        return 0
+    end
+    local count = 0
+    for k in pairs(LevelingLad_DB.snoozedPlays) do
+        LevelingLad_DB.snoozedPlays[k] = nil
+        count = count + 1
+    end
+    return count
+end
+
+function LL.GetActiveSnoozedPlays(nowOverride)
+    local now = (type(nowOverride) == "number") and nowOverride or ((_G.time and _G.time()) or 0)
+    LL.PruneExpiredSnoozes(now)
+    local list = {}
+    if not LevelingLad_DB or type(LevelingLad_DB.snoozedPlays) ~= "table" then
+        return list
+    end
+    for key, entry in pairs(LevelingLad_DB.snoozedPlays) do
+        if type(entry) == "table" then
+            local isPerm = (not entry.expiresAt or entry.expiresAt <= 0)
+            local remSec = isPerm and nil or math.max(0, entry.expiresAt - now)
+            local remText = isPerm and "Permanent" or LL.FormatAgeShort(remSec)
+            table.insert(list, {
+                key = key,
+                recipeId = entry.recipeId,
+                outputItemId = entry.outputItemId,
+                itemId = entry.outputItemId,
+                itemName = entry.itemName or key,
+                itemLink = entry.itemLink,
+                profession = entry.profession,
+                skillLine = entry.skillLine,
+                snoozedAt = entry.snoozedAt or 0,
+                expiresAt = entry.expiresAt or 0,
+                reason = entry.reason or (isPerm and "permanent" or "manual"),
+                isPermanent = isPerm,
+                remainingSeconds = remSec,
+                remainingText = remText,
+            })
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.snoozedAt ~= b.snoozedAt then
+            return a.snoozedAt > b.snoozedAt
+        end
+        return tostring(a.itemName) < tostring(b.itemName)
+    end)
+    return list
+end
+
+-- ============================================================================
+-- Memoized Auction House Data Status (PCF + OrderBook + Auctionator)
+-- ============================================================================
+
+local ahStatusCache = nil
+
+function LL.InvalidateAHStatusCache()
+    ahStatusCache = nil
+end
+
 -- Evaluates whether Auction House price data is available and fresh.
+-- Respects LevelingLad_DB.settings.priceSource ("AUTO" | "PCF" | "AUCTIONATOR") and memoizes counts.
 -- Returns: status ("NO_DATA" | "STALE" | "FRESH"), detailsTable
 function LL.GetAHDataStatus()
     local now = (_G.time and _G.time()) or 0
     local threshold = (LevelingLad_DB and LevelingLad_DB.settings and tonumber(LevelingLad_DB.settings.staleDataThresholdSeconds)) or 86400
+    local mode = LL.GetPriceSourceMode()
+
+    local pcfPrices = (mode ~= "AUCTIONATOR" and _G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices or nil
+    local pcfEmpty = (not pcfPrices) or (next(pcfPrices) == nil)
+    local lastScanTs = 0
+    if mode ~= "AUCTIONATOR" and _G.PCF_DB then
+        local fullTs = tonumber(_G.PCF_DB.lastFullScan) or 0
+        local repTs = tonumber(_G.PCF_DB.lastReplicateScan) or 0
+        lastScanTs = math.max(fullTs, repTs)
+    end
+
+    local obCache = (LevelingLad_DB and type(LevelingLad_DB.orderBookCache) == "table") and LevelingLad_DB.orderBookCache or nil
+    local obEmpty = (not obCache) or (next(obCache) == nil)
+    local obRev = (LL.AHVerifier and LL.AHVerifier.GetOrderBookRevision and LL.AHVerifier.GetOrderBookRevision()) or 0
+
+    local atrPriceTable = (mode ~= "PCF" and LL.AuctionatorSource and LL.AuctionatorSource.GetRealmPriceTable and LL.AuctionatorSource.GetRealmPriceTable()) or nil
+    local atrEmpty = (not atrPriceTable) or (next(atrPriceTable) == nil)
+    local atrScanTs = (mode ~= "PCF" and LL.AuctionatorSource and LL.AuctionatorSource.GetLastScanTimestamp and LL.AuctionatorSource.GetLastScanTimestamp()) or 0
+    local atrRev = (LL.AuctionatorSource and LL.AuctionatorSource.GetCacheRevision and LL.AuctionatorSource.GetCacheRevision()) or 0
+
+    if ahStatusCache
+        and math.abs(now - ahStatusCache.computedAt) < 2
+        and ahStatusCache.mode == mode
+        and ahStatusCache.threshold == threshold
+        and ahStatusCache.pcfPrices == pcfPrices
+        and ahStatusCache.pcfEmpty == pcfEmpty
+        and ahStatusCache.lastScanTs == lastScanTs
+        and ahStatusCache.obCache == obCache
+        and ahStatusCache.obEmpty == obEmpty
+        and ahStatusCache.obRev == obRev
+        and ahStatusCache.atrPriceTable == atrPriceTable
+        and ahStatusCache.atrEmpty == atrEmpty
+        and ahStatusCache.atrScanTs == atrScanTs
+        and ahStatusCache.atrRev == atrRev then
+        return ahStatusCache.status, ahStatusCache.info
+    end
+
+    local function CacheAndReturn(status, info)
+        ahStatusCache = {
+            status = status,
+            info = info,
+            computedAt = now,
+            mode = mode,
+            threshold = threshold,
+            pcfPrices = pcfPrices,
+            pcfEmpty = pcfEmpty,
+            lastScanTs = lastScanTs,
+            obCache = obCache,
+            obEmpty = obEmpty,
+            obRev = obRev,
+            atrPriceTable = atrPriceTable,
+            atrEmpty = atrEmpty,
+            atrScanTs = atrScanTs,
+            atrRev = atrRev,
+        }
+        return status, info
+    end
 
     local pcfItems = 0
     local newestEntryTs = 0
-    local hasUntimestampedEntry = false
+    local hasUntimestampedPCF = false
 
-    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
-        for itemId, entry in pairs(_G.PCF_DB.prices) do
+    if pcfPrices and not pcfEmpty then
+        for itemId, entry in pairs(pcfPrices) do
             if type(itemId) == "number" and itemId > 0 and type(entry) == "table" and entry.minBuyout and entry.minBuyout > 0 then
                 pcfItems = pcfItems + 1
                 local ts = tonumber(entry.lastUpdated) or 0
                 if ts > newestEntryTs then
                     newestEntryTs = ts
                 elseif ts <= 0 then
-                    hasUntimestampedEntry = true
+                    hasUntimestampedPCF = true
                 end
             end
         end
@@ -282,8 +587,8 @@ function LL.GetAHDataStatus()
 
     local obItems = 0
     local newestOBTs = 0
-    if LevelingLad_DB and type(LevelingLad_DB.orderBookCache) == "table" then
-        for itemId, ob in pairs(LevelingLad_DB.orderBookCache) do
+    if obCache and not obEmpty then
+        for itemId, ob in pairs(obCache) do
             if type(itemId) == "number" and itemId > 0 and type(ob) == "table" and not ob.unavailable and type(ob.listings) == "table" and #ob.listings > 0 then
                 obItems = obItems + 1
                 local ts = tonumber(ob.timestamp) or 0
@@ -294,56 +599,101 @@ function LL.GetAHDataStatus()
         end
     end
 
-    local lastScanTs = 0
-    if _G.PCF_DB then
-        local fullTs = tonumber(_G.PCF_DB.lastFullScan) or 0
-        local repTs = tonumber(_G.PCF_DB.lastReplicateScan) or 0
-        lastScanTs = math.max(fullTs, repTs)
+    local auctionatorItems = 0
+    local auctionatorTs = 0
+    local hasUntimestampedAtr = false
+    if mode ~= "PCF" and LL.AuctionatorSource and LL.AuctionatorSource.GetStatus then
+        local atrStatus = LL.AuctionatorSource.GetStatus()
+        if atrStatus then
+            auctionatorItems = atrStatus.itemCount or 0
+            auctionatorTs = atrStatus.lastScanTimestamp or 0
+            hasUntimestampedAtr = (atrStatus.hasUntimestamped == true)
+        end
     end
 
-    local totalItems = math.max(pcfItems, obItems)
-    local bestTs = math.max((pcfItems > 0 and ((lastScanTs > 0) and lastScanTs or newestEntryTs)) or 0, newestOBTs)
+    local effectivePCFTs = (pcfItems > 0) and ((lastScanTs > 0) and lastScanTs or newestEntryTs) or 0
+    local effectiveAtrTs = (auctionatorItems > 0) and auctionatorTs or 0
+
+    local totalItems = math.max(pcfItems, obItems, auctionatorItems)
+    local bestTs = math.max(effectivePCFTs, newestOBTs, effectiveAtrTs)
+    local hasUntimestampedEntry = hasUntimestampedPCF or hasUntimestampedAtr
+
+    local activeSource = "None"
+    if totalItems > 0 then
+        if mode == "AUCTIONATOR" then
+            activeSource = (auctionatorItems > 0) and "Auctionator" or ((obItems > 0) and "Live AH" or "None")
+        elseif mode == "PCF" then
+            activeSource = (pcfItems > 0) and "PCF" or ((obItems > 0) and "Live AH" or "None")
+        else
+            if auctionatorItems > 0 and effectiveAtrTs >= effectivePCFTs and (effectiveAtrTs > 0 or pcfItems == 0) then
+                activeSource = "Auctionator"
+            elseif pcfItems > 0 then
+                activeSource = "PCF"
+            elseif auctionatorItems > 0 then
+                activeSource = "Auctionator"
+            elseif obItems > 0 then
+                activeSource = "Live AH"
+            end
+        end
+    end
 
     if totalItems <= 0 then
-        return "NO_DATA", {
+        return CacheAndReturn("NO_DATA", {
             status = "NO_DATA",
             itemCount = 0,
             pcfItems = 0,
             orderBookItems = 0,
+            auctionatorItems = 0,
+            activeSource = "None",
+            priceSourceMode = mode,
             lastScanTimestamp = 0,
             ageSeconds = nil,
             ageText = "never",
-        }
+        })
     end
 
     if bestTs <= 0 and hasUntimestampedEntry then
-        return "FRESH", {
+        return CacheAndReturn("FRESH", {
             status = "FRESH",
             itemCount = totalItems,
             pcfItems = pcfItems,
             orderBookItems = obItems,
+            auctionatorItems = auctionatorItems,
+            activeSource = activeSource,
+            priceSourceMode = mode,
             lastScanTimestamp = now,
             ageSeconds = 0,
             ageText = "0m",
-        }
+        })
     end
 
     local ageSeconds = math.max(0, now - bestTs)
     local ageText = LL.FormatAgeShort(ageSeconds)
     local status = (ageSeconds > threshold) and "STALE" or "FRESH"
 
-    return status, {
+    return CacheAndReturn(status, {
         status = status,
         itemCount = totalItems,
         pcfItems = pcfItems,
         orderBookItems = obItems,
+        auctionatorItems = auctionatorItems,
+        activeSource = activeSource,
+        priceSourceMode = mode,
         lastScanTimestamp = bestTs,
         ageSeconds = ageSeconds,
         ageText = ageText,
-    }
+    })
 end
 
 function LL.LoadConfig(customDB)
+    LL.InvalidateAHStatusCache()
+    if LL.RecipeScanner and LL.RecipeScanner.InvalidateCache then
+        LL.RecipeScanner.InvalidateCache()
+    end
+    if LL.AHVerifier and LL.AHVerifier.InvalidateEvaluatedPool then
+        LL.AHVerifier.InvalidateEvaluatedPool()
+    end
+
     if type(customDB) == "table" then
         LevelingLad_DB = customDB
     else
@@ -362,6 +712,15 @@ function LL.LoadConfig(customDB)
         LevelingLad_DB.lastRoadmap = nil
         LevelingLad_DB.activePlay = nil
         LevelingLad_DB.version = 4
+    end
+
+    -- v5 migration: switch existing installs to closed-by-default at the Auction House
+    -- (can be re-enabled anytime in Options or /ll autoopen).
+    if prevVersion > 0 and prevVersion < 5 then
+        if LevelingLad_DB.settings then
+            LevelingLad_DB.settings.showSideWindow = false
+        end
+        LevelingLad_DB.version = 5
     end
 
     return LevelingLad_DB

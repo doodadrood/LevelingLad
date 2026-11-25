@@ -14,6 +14,7 @@ require("Config")
 require("Utils.Formatter")
 require("Data.VendorDatabase")
 require("Data.RecipeDatabase")
+require("Modules.AuctionatorSource")
 require("Modules.RecipeScanner")
 require("Modules.LevelingEngine")
 require("Modules.AHVerifier")
@@ -205,10 +206,29 @@ local blockedCraft, blockReason = LL.RecipeScanner.CraftRecipe(activePlay.recipe
 Assert(blockedCraft == false and blockReason == "TARGET_REACHED",
     "CraftRecipe automatically halts crafting once target skill is reached to save remaining mats")
 
--- 8. SideWindow Docking & Slash Command Smoke Tests (including /ll debug)
+-- 8. SideWindow Left-Docking, Closed-by-Default, Top-Left AH Button & Slash Command Smoke Tests
+if LL.SideWindow.frame then LL.SideWindow.frame:Hide() end
 Mock.FireEvent("AUCTION_HOUSE_SHOW")
+Assert(LL.SideWindow.frame == nil or LL.SideWindow.frame:IsShown() == false,
+    "SideWindow stays closed by default on AUCTION_HOUSE_SHOW")
+local ahBtn = _G["LL_AuctionToggleButton"]
+Assert(ahBtn ~= nil and ahBtn:IsShown() == true,
+    "Top-left Leveling Lad toggle button is created and visible on AUCTION_HOUSE_SHOW")
+local btnPt, btnRel, btnRelPt, btnX = ahBtn:GetPoint(1)
+Assert(btnPt == "TOPLEFT" and btnRel == _G.AuctionFrame and btnRelPt == "TOPLEFT" and btnX > 0,
+    "AH toggle button anchors to TOPLEFT of the Auction House screen")
+
+ahBtn:Click("LeftButton")
 Assert(LL.SideWindow.frame ~= nil and LL.SideWindow.frame:IsShown() == true,
-    "SideWindow automatically opens and docks on AUCTION_HOUSE_SHOW")
+    "Left-clicking the top-left AH button opens SideWindow")
+local swPt, swRel, swRelPt, swX, swY = LL.SideWindow.frame:GetPoint(1)
+Assert(swPt == "TOPRIGHT" and swRel == _G.AuctionFrame and swRelPt == "TOPLEFT" and swX == -6 and swY == 0,
+    "SideWindow docks on the LEFT side of the Auction House (TOPRIGHT -> TOPLEFT, -6, 0)")
+
+ahBtn:Click("RightButton")
+Assert(_G["LL_SettingsWindow"] ~= nil and _G["LL_SettingsWindow"]:IsShown() == true,
+    "Right-clicking the top-left AH button opens the Leveling Lad Options window")
+_G["LL_SettingsWindow"]:Hide()
 
 _G.SlashCmdList["LEVELINGLAD"]("budget 15g")
 Assert(LevelingLad_DB.settings.budgetCopper == 150000, "/ll budget 15g updates budgetCopper to 150000c")
@@ -466,17 +486,191 @@ local _, r266, hit266 = LL.RecipeScanner.HandleSkillMessage("Your skill in Black
 Assert(r265 == 265 and hit265 == true and r266 == 266 and hit266 == false,
     "Goal alert fires exactly once at target 265 and never repeats at 266")
 
--- 13. Verify v2/v3 -> v4 DB migration purges tainted unlearned recipes and stale activePlay
+-- 13. Verify v3/v4 -> v5 DB migration purges tainted unlearned recipes and sets showSideWindow=false
 local v3DB = {
     version = 3,
+    settings = { showSideWindow = true },
     charRecipes = { ["SkillTester-Forever"] = { ["164:22757"] = { name = "Elemental Sharpening Stone", learned = false, orange = 260, gray = 295 } } },
     lastTopPlays = { { recipeName = "Elemental Sharpening Stone" } },
     lastRoadmap = { steps = { { recipeName = "Elemental Sharpening Stone" } } },
     activePlay = { recipeName = "Ornate Mithril Helm", targetSkill = 260 },
 }
 LL.LoadConfig(v3DB)
-Assert(v3DB.version == 4 and next(v3DB.charRecipes) == nil and #v3DB.lastTopPlays == 0 and v3DB.lastRoadmap == nil and v3DB.activePlay == nil,
-    "Config v3->v4 migration purges unverified unlearned charRecipes, lastTopPlays, lastRoadmap, and stale activePlay")
+Assert(v3DB.version == 5 and v3DB.settings.showSideWindow == false
+    and next(v3DB.charRecipes) == nil and #v3DB.lastTopPlays == 0 and v3DB.lastRoadmap == nil and v3DB.activePlay == nil,
+    "Config v3->v5 migration purges unverified unlearned charRecipes and migrates showSideWindow to false")
+
+local v4DB = {
+    version = 4,
+    settings = { showSideWindow = true },
+    charRecipes = { ["SkillTester-Forever"] = { ["164:16657"] = { name = "Imperial Plate Bracers", learned = true, orange = 260, gray = 295 } } },
+}
+LL.LoadConfig(v4DB)
+Assert(v4DB.version == 5 and v4DB.settings.showSideWindow == false and v4DB.charRecipes["SkillTester-Forever"]["164:16657"] ~= nil,
+    "Config v4->v5 migration preserves valid v4 learned recipes while switching showSideWindow to false")
+
+-- Restore clean DB for subsequent tests
+LL.LoadConfig({})
+
+-- 14. Play Snoozing (24h & Permanent), Fast O(M) Pool Rotation, and Milestone Path Exemption
+Mock.Reset()
+Mock.playerMoney = 2000000
+_G.PCF_DB.prices = {
+    [2835] = { minBuyout = 10,  count = 500, lastUpdated = Mock.currentTime }, -- Rough Stone (cheapest)
+    [2840] = { minBuyout = 80,  count = 500, lastUpdated = Mock.currentTime }, -- Copper Bar (2nd)
+    [2836] = { minBuyout = 200, count = 500, lastUpdated = Mock.currentTime }, -- Coarse Stone (3rd)
+}
+LevelingLad_DB.charRecipes = {}
+LevelingLad_DB.settings.selectedProfession = 164
+LevelingLad_DB.settings.targetMode = "PLUS5"
+Mock.professions = { { name = "Blacksmithing", skillLevel = 20, maxSkillLevel = 75, skillLine = 164 } }
+Mock.modernProfession = { professionID = 164, parentProfessionID = 164, professionName = "Blacksmithing", parentProfessionName = "Blacksmithing", skillLevel = 20, maxSkillLevel = 75 }
+Mock.modernRecipes = {
+    [2660] = { recipeID = 2660, name = "Rough Sharpening Stone", learned = true, outputItemID = 2862, skillLine = 164, professionName = "Blacksmithing", relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal, reagents = { { itemID = 2835, qty = 1 } } },
+    [2663] = { recipeID = 2663, name = "Copper Bracers", learned = true, outputItemID = 2853, skillLine = 164, professionName = "Blacksmithing", relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal, reagents = { { itemID = 2840, qty = 2 } } },
+    [3115] = { recipeID = 3115, name = "Coarse Sharpening Stone", learned = true, outputItemID = 2863, skillLine = 164, professionName = "Blacksmithing", relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Optimal, reagents = { { itemID = 2836, qty = 1 } } },
+}
+LL.RecipeScanner.ScanModernTradeSkillUI()
+LL.SideWindow.Toggle()
+LL.AHVerifier.RecalculateFromCache(164)
+LL.SideWindow.Refresh()
+
+Assert(#LevelingLad_DB.lastTopPlays == 3 and LevelingLad_DB.lastTopPlays[1].recipeName == "Rough Sharpening Stone",
+    "Before snoozing, Rough Sharpening Stone is Rank #1 in Top Plays")
+Assert(_G["LL_SidePlayBtn1_Snooze"]:IsShown() == true, "Snooze 'x' button is visible on populated Top 5 rows")
+
+-- Snooze #1 via Right-Click -> rotates Copper Bracers to #1 in O(M) while Milestone Path STILL uses Rough Sharpening Stone!
+_G["LL_SidePlayBtn1"]:Click("RightButton")
+Assert(#LevelingLad_DB.lastTopPlays == 2 and LevelingLad_DB.lastTopPlays[1].recipeName == "Copper Bracers",
+    "Right-clicking Top Play #1 snoozes it for 24h and immediately rotates Copper Bracers to Rank #1")
+
+local roadmapWhileSnoozed = LL.LevelingEngine.PlanMilestonePath(164, 20, 25)
+Assert(#roadmapWhileSnoozed.steps == 1 and roadmapWhileSnoozed.steps[1].recipeName == "Rough Sharpening Stone",
+    "Milestone Path still uses snoozed Rough Sharpening Stone (snooze applies to Top 5 only)")
+
+-- Verify Snoozed Window & /ll unhide
+_G.SlashCmdList["LEVELINGLAD"]("hidden")
+Assert(_G["LL_SnoozedPlaysWindow"] ~= nil and _G["LL_SnoozedPlaysWindow"]:IsShown() == true,
+    "/ll hidden opens the Snoozed Plays management window")
+_G.SlashCmdList["LEVELINGLAD"]("unhide rough sharpening")
+Assert(#LevelingLad_DB.lastTopPlays == 3 and LevelingLad_DB.lastTopPlays[1].recipeName == "Rough Sharpening Stone",
+    "/ll unhide restores Rough Sharpening Stone back to Rank #1")
+
+-- Verify automatic 24h expiry
+LL.SnoozePlay(LevelingLad_DB.lastTopPlays[1], 3600, "manual")
+Assert(LL.IsPlaySnoozed(LevelingLad_DB.lastTopPlays[1]) == true, "Play is snoozed before 1h expiry")
+Mock.currentTime = Mock.currentTime + 3601
+Assert(LL.IsPlaySnoozed(LevelingLad_DB.lastTopPlays[1]) == false, "Snoozed play automatically expires after TTL")
+
+-- 15. Auctionator Price Source (Auto / PCF / Auctionator) & Minimap Button
+Mock.Reset()
+_G.PCF_DB.prices = {
+    [2835] = { minBuyout = 90, count = 100, lastUpdated = Mock.currentTime - 3600 }, -- older PCF scan (90c)
+}
+_G.AUCTIONATOR_SAVEDVARS = { TimeOfLastReplicateScan = math.floor(Mock.currentTime) } -- fresher Atr scan (35c)
+_G.AUCTIONATOR_PRICE_DATABASE = {
+    ["Forever"] = {
+        ["2835"] = { m = 35, a = { [20000] = 120 } },
+        ["g:7937:0:0"] = { m = 15000, a = { [20000] = 2 } },
+    },
+}
+LL.AuctionatorSource.InvalidateCache()
+local atrStatus, atrInfo = LL.GetAHDataStatus()
+Assert(atrStatus == "FRESH" and atrInfo.activeSource == "Auctionator" and atrInfo.auctionatorItems == 2,
+    "GetAHDataStatus detects fresher Auctionator realm database (including suffixed gear keys)")
+Assert(LL.ResolveExternalAHPrice(2835) == 35,
+    "AUTO price source picks fresher Auctionator buyout (35c) over older PCF scan (90c)")
+LL.SideWindow.SetPriceSource("pcf", true)
+Assert(LL.ResolveExternalAHPrice(2835) == 90,
+    "PCF price source mode strictly uses PCF scan price (90c)")
+LL.SideWindow.SetPriceSource("auctionator", true)
+Assert(LL.ResolveExternalAHPrice(2835) == 35 and LL.ResolveExternalAHPrice(7937) == 15000,
+    "AUCTIONATOR price source mode resolves both commodity and suffixed gear prices")
+LL.SideWindow.SetPriceSource("auto", true)
+
+Assert(_G["LibDBIcon10_LevelingLad"] ~= nil and _G["LibDBIcon10_LevelingLad"].dataObject ~= nil,
+    "Minimap button LibDBIcon10_LevelingLad is initialized with LibDataBroker-compatible dataObject")
+_G.SlashCmdList["LEVELINGLAD"]("minimap")
+Assert(_G["LibDBIcon10_LevelingLad"]:IsShown() == false, "/ll minimap hides the minimap button")
+_G.SlashCmdList["LEVELINGLAD"]("minimap")
+Assert(_G["LibDBIcon10_LevelingLad"]:IsShown() == true, "/ll minimap restores the minimap button")
+
+-- 16. 1-Click "Buy Next" (Merchant + Legacy AH) & Combat Secret-String Protection
+Mock.Reset()
+Mock.playerMoney = 500000
+Mock.merchantItems = {
+    { itemId = 2880, name = "Weak Flux", price = 100, quantity = 1, numAvailable = -1 },
+}
+local boughtVendor, vendorQty = LL.AHVerifier.BuyNextCheapListing(2880, "Weak Flux", 100, 7)
+Assert(boughtVendor == true and vendorQty == 7 and #Mock.boughtMerchantItems == 1 and Mock.boughtMerchantItems[1].quantity == 7,
+    "1-Click Buy Next purchases exact needed stack (7x Weak Flux) from open NPC Merchant")
+
+Mock.currentAuctionResults = {
+    { itemId = 2835, name = "Rough Stone", count = 5, buyoutPrice = 250 },
+}
+local boughtAH, ahQty, ahSpent = LL.AHVerifier.BuyNextCheapListing(2835, "Rough Stone", 80, 10)
+Assert(boughtAH == true and ahQty == 5 and ahSpent == 250 and #Mock.placedBids == 1,
+    "1-Click Buy Next places buyout on cheapest qualifying Legacy AH listing")
+
+LL.AHVerifier.ClearPurchasedTracker()
+LevelingLad_DB.activePlay = { shoppingList = { { itemId = 2835, name = "Rough Stone" } } }
+Mock.FireEvent("CHAT_MSG_SYSTEM", "You won an auction for Rough Stone (x12)")
+Assert(LL.AHVerifier.GetPurchasedInMailCount(2835) == 12,
+    "CHAT_MSG_SYSTEM parses multi-stack 'You won an auction for Rough Stone (x12)' into mailbox tracker")
+
+local secretMsg = "SECRET_COMBAT_STRING"
+Mock.secretValues[secretMsg] = true
+Mock.FireEvent("CHAT_MSG_SYSTEM", secretMsg)
+Mock.FireEvent("CHAT_MSG_SKILL", secretMsg)
+Assert(LL.AHVerifier.ParseAuctionWonMessage(secretMsg) == nil,
+    "Combat secret strings in CHAT_MSG_SYSTEM and CHAT_MSG_SKILL are safely ignored without taint errors")
+
+-- 17. Crafting Window Scan UX: Unscanned Notice, Stale-Skill Notice & Background Auto-Sync
+Mock.Reset()
+_G.PCF_DB.prices = { [2835] = { minBuyout = 20, count = 500, lastUpdated = Mock.currentTime } }
+LevelingLad_DB.charRecipes = {}
+LevelingLad_DB.charProfScans = {}
+LevelingLad_DB.settings.selectedProfession = 164
+Mock.professions = { { name = "Blacksmithing", skillLevel = 50, maxSkillLevel = 75, skillLine = 164 } }
+Mock.modernRecipes = {} -- Blacksmithing has NOT been opened yet!
+
+local unscannedState = LL.RecipeScanner.GetProfessionScanStatus(164)
+Assert(unscannedState == "UNSCANNED", "GetProfessionScanStatus reports UNSCANNED before Blacksmithing is opened")
+
+_G.AuctionFrame:Show()
+if LL.SideWindow.frame then LL.SideWindow.frame:Hide() end
+LL.SideWindow.Toggle()
+Assert(_G["LL_SidePlayBtn1"]:IsShown() == true
+    and _G["LL_SidePlayBtn1"].mainText:GetText():find("Open Blacksmithing to Calculate Plays") ~= nil,
+    "At the AH with unscanned Blacksmithing, Top Plays shows 'Open Blacksmithing to Calculate Plays' notice")
+
+-- Simulate background auto-open when away from the AH: OpenTradeSkill populates recipes, scans, and closes ProfessionsFrame!
+_G.AuctionFrame:Hide()
+LL.SideWindow.frame:Hide()
+Mock.onOpenTradeSkill = function(skillLineID)
+    if skillLineID == 164 then
+        Mock.modernProfession = { professionID = 164, parentProfessionID = 164, professionName = "Blacksmithing", parentProfessionName = "Blacksmithing", skillLevel = 50, maxSkillLevel = 75 }
+        Mock.modernRecipes = {
+            [2660] = { recipeID = 2660, name = "Rough Sharpening Stone", learned = true, outputItemID = 2862, skillLine = 164, professionName = "Blacksmithing", relativeDifficulty = _G.Enum.TradeskillRelativeDifficulty.Medium, reagents = { { itemID = 2835, qty = 1 } } },
+        }
+    end
+end
+LL.SideWindow.Toggle()
+Assert(LL.RecipeScanner.GetProfessionScanStatus(164) == "READY"
+    and _G.ProfessionsFrame:IsShown() == false
+    and #(LevelingLad_DB.lastTopPlays or {}) == 1,
+    "Outside the AH, opening Leveling Lad auto-syncs Blacksmithing in the background, closes ProfessionsFrame, and calculates plays")
+
+-- Simulate skill rank changing (50 -> 58) while C_TradeSkillUI is unloaded (e.g. after relogging at the AH)
+Mock.onOpenTradeSkill = nil
+Mock.modernRecipes = {}
+Mock.professions = { { name = "Blacksmithing", skillLevel = 58, maxSkillLevel = 75, skillLine = 164 } }
+_G.AuctionFrame:Show()
+LL.SideWindow.Refresh()
+Assert(LL.RecipeScanner.GetProfessionScanStatus(164) == "NEEDS_RESCAN"
+    and _G["LL_SidePlayBtn1"].mainText:GetText():find("Open Blacksmithing to Calculate Plays") ~= nil
+    and _G["LL_SidePlayBtn1"].subText:GetText():find("50 %-> 58") ~= nil,
+    "When skill increased (50 -> 58) without an active TradeSkill scan, Top Plays hides stale math and prompts to open Blacksmithing")
 
 print("================================================================")
 print(string.format(" ALL TESTS PASSED! (%d passed, %d failed)", passed, failed))

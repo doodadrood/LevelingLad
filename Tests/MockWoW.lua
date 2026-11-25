@@ -34,10 +34,13 @@ local Mock = {
     selectedTradeSkill = nil,
     craftedTradeSkill = nil,
     placedBids = {},
+    boughtMerchantItems = {},
     merchantItems = {},
     trainerServices = {}, -- { { name, serviceType, skillName, minSkill, cost, itemLink }, ... }
     depositRate = 5,
     inCombat = false,
+    secretValues = {},
+    onOpenTradeSkill = nil,
     frames = {},
     chatMessages = {},
     useModernTradeSkill = false,
@@ -51,6 +54,7 @@ _G.UnitName = function(unit) return unit == "player" and "SkillTester" or "Targe
 _G.GetRealmName = function() return "Forever" end
 _G.GetMoney = function() return Mock.playerMoney end
 _G.InCombatLockdown = function() return Mock.inCombat == true end
+_G.issecretvalue = function(v) return v ~= nil and Mock.secretValues[v] == true end
 
 _G.GetItemCount = function(itemId, includeBank)
     local bags = Mock.bagCounts[itemId] or 0
@@ -162,6 +166,7 @@ _G.CreateFrame = function(frameType, name, parent, template)
 
     function frame:GetName() return self.name end
     function frame:GetParent() return self.parent end
+    function frame:SetParent(p) self.parent = p end
     function frame:RegisterEvent(event) self.events[event] = true end
     function frame:UnregisterEvent(event) self.events[event] = nil end
     function frame:SetScript(scriptName, func) self.scripts[scriptName] = func end
@@ -191,17 +196,29 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:SetSize(w, h) self.width = w; self.height = h end
     function frame:SetWidth(w) self.width = w end
     function frame:SetHeight(h) self.height = h end
-    function frame:SetPoint(...) end
-    function frame:ClearAllPoints() end
+    function frame:SetPoint(point, relativeTo, relativePoint, x, y)
+        self.points = self.points or {}
+        table.insert(self.points, { point = point, relativeTo = relativeTo, relativePoint = relativePoint, x = x, y = y })
+    end
+    function frame:GetPoint(idx)
+        local p = self.points and self.points[idx or 1]
+        if not p then return nil end
+        return p.point, p.relativeTo, p.relativePoint, p.x, p.y
+    end
+    function frame:ClearAllPoints() self.points = {} end
     function frame:SetAllPoints(...) end
     function frame:SetFrameStrata(s) self.strata = s end
     function frame:GetFrameStrata() return self.strata end
+    function frame:SetFrameLevel(l) self.frameLevel = l end
     function frame:SetToplevel(v) self.toplevel = (v == true) end
     function frame:IsToplevel() return self.toplevel == true end
     function frame:Raise() self.raiseCount = (self.raiseCount or 0) + 1 end
     function frame:SetMovable(...) end
+    function frame:SetClampedToScreen(...) end
     function frame:EnableMouse(...) end
+    function frame:RegisterForClicks(...) end
     function frame:RegisterForDrag(...) end
+    function frame:SetHighlightTexture(...) end
     function frame:StartMoving() end
     function frame:StopMovingOrSizing() end
     function frame:SetAutoFocus(...) end
@@ -264,6 +281,7 @@ _G.CreateFrame = function(frameType, name, parent, template)
 end
 
 _G.UIParent = _G.CreateFrame("Frame", "UIParent")
+_G.Minimap = _G.CreateFrame("Frame", "Minimap", _G.UIParent)
 _G.GameTooltip = _G.CreateFrame("GameTooltip", "GameTooltip")
 _G.AuctionFrame = _G.CreateFrame("Frame", "AuctionFrame", _G.UIParent)
 _G.BrowseName = _G.CreateFrame("EditBox", "BrowseName", _G.AuctionFrame)
@@ -453,7 +471,13 @@ _G.C_TradeSkillUI = {
     OpenTradeSkill = function(skillLineID)
         Mock.lastOpenedTradeSkill = skillLineID
         _G.ProfessionsFrame:Show()
+        if type(Mock.onOpenTradeSkill) == "function" then
+            Mock.onOpenTradeSkill(skillLineID)
+        end
         return true
+    end,
+    CloseTradeSkill = function()
+        _G.ProfessionsFrame:Hide()
     end,
     OpenRecipe = function(recipeID)
         Mock.lastOpenedRecipeId = recipeID
@@ -505,6 +529,9 @@ _G.GetMerchantItemLink = function(index)
     if not m then return nil end
     return m.link or string.format("|cffffffff|Hitem:%d:0:0:0|h[%s]|h|r", m.itemId, m.name or "Item")
 end
+_G.BuyMerchantItem = function(index, quantity)
+    table.insert(Mock.boughtMerchantItems, { index = index, quantity = quantity or 1 })
+end
 
 function Mock.Reset()
     Mock.currentTime = 1700000000.0
@@ -541,13 +568,29 @@ function Mock.Reset()
     Mock.selectedTradeSkill = nil
     Mock.craftedTradeSkill = nil
     Mock.placedBids = {}
+    Mock.boughtMerchantItems = {}
     Mock.merchantItems = {}
     Mock.trainerServices = {}
     Mock.depositRate = 5
     Mock.inCombat = false
+    Mock.secretValues = {}
+    Mock.onOpenTradeSkill = nil
+    _G.AUCTIONATOR_PRICE_DATABASE = nil
+    _G.AUCTIONATOR_SAVEDVARS = nil
     _G.AuctionFrame:Show()
     _G.TradeSkillFrame:Hide()
     _G.ProfessionsFrame:Hide()
+    if _G.LevelingLad_DB then
+        _G.LevelingLad_DB.snoozedPlays = {}
+        _G.LevelingLad_DB.charProfScans = {}
+        if _G.LevelingLad_DB.settings then
+            _G.LevelingLad_DB.settings.priceSource = "AUTO"
+            _G.LevelingLad_DB.settings.showSideWindow = false
+        end
+    end
+    if _G.LL and _G.LL.InvalidateAHStatusCache then
+        _G.LL.InvalidateAHStatusCache()
+    end
 end
 
 return Mock

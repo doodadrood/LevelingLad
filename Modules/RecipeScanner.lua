@@ -5,7 +5,23 @@ _G.LevelingLad = LL
 LL.RecipeScanner = {}
 
 local pendingOpenRecipe = nil
+local pendingBackgroundScan = nil
+local pendingScanRetry = false
 local skillupCallbacks = {}
+local recipeCacheRevision = 0
+local professionRecipesCache = {}
+
+function LL.RecipeScanner.InvalidateCache()
+    recipeCacheRevision = recipeCacheRevision + 1
+    professionRecipesCache = {}
+    if LL.AHVerifier and LL.AHVerifier.InvalidateEvaluatedPool then
+        LL.AHVerifier.InvalidateEvaluatedPool()
+    end
+end
+
+function LL.RecipeScanner.GetCacheRevision()
+    return recipeCacheRevision
+end
 
 local DIFFICULTY_NORMALIZE = {
     optimal = "ORANGE",
@@ -88,6 +104,7 @@ local function EnsureCharTables()
     LevelingLad_DB = LevelingLad_DB or {}
     LevelingLad_DB.charRecipes = LevelingLad_DB.charRecipes or {}
     LevelingLad_DB.charSkills = LevelingLad_DB.charSkills or {}
+    LevelingLad_DB.charProfScans = LevelingLad_DB.charProfScans or {}
     local charKey = LL.GetCharacterKey()
     if type(LevelingLad_DB.charRecipes[charKey]) ~= "table" then
         LevelingLad_DB.charRecipes[charKey] = {}
@@ -95,7 +112,89 @@ local function EnsureCharTables()
     if type(LevelingLad_DB.charSkills[charKey]) ~= "table" then
         LevelingLad_DB.charSkills[charKey] = {}
     end
-    return LevelingLad_DB.charRecipes[charKey], LevelingLad_DB.charSkills[charKey], charKey
+    if type(LevelingLad_DB.charProfScans[charKey]) ~= "table" then
+        LevelingLad_DB.charProfScans[charKey] = {}
+    end
+    return LevelingLad_DB.charRecipes[charKey], LevelingLad_DB.charSkills[charKey], charKey, LevelingLad_DB.charProfScans[charKey]
+end
+
+local function RecordProfessionScanMeta(skillLine, scannedRank, recipeCount, needsRescan, reason)
+    if not skillLine then return end
+    local _, _, _, charProfScans = EnsureCharTables()
+    local existing = charProfScans[skillLine] or {}
+    local now = (_G.time and _G.time()) or 0
+    if scannedRank ~= nil then
+        existing.scannedRank = math.max(1, math.floor(tonumber(scannedRank) or 1))
+        existing.scannedAt = now
+    end
+    if recipeCount ~= nil then
+        existing.recipeCount = math.max(0, math.floor(tonumber(recipeCount) or 0))
+    end
+    if needsRescan ~= nil then
+        existing.needsRescan = (needsRescan == true)
+        existing.rescanReason = needsRescan and (reason or "RESCAN") or nil
+    end
+    charProfScans[skillLine] = existing
+end
+
+local function IsProfessionFrameShown()
+    if _G.ProfessionsFrame and _G.ProfessionsFrame.IsShown and _G.ProfessionsFrame:IsShown() then
+        return true
+    end
+    if _G.TradeSkillFrame and _G.TradeSkillFrame.IsShown and _G.TradeSkillFrame:IsShown() then
+        return true
+    end
+    return false
+end
+
+-- Returns the skillLine currently loaded inside modern C_TradeSkillUI (if ready and non-empty), or nil.
+local function GetLoadedModernSkillLine()
+    if not _G.C_TradeSkillUI or not _G.C_TradeSkillUI.GetAllRecipeIDs then
+        return nil, nil
+    end
+    if _G.C_TradeSkillUI.IsTradeSkillLinked then
+        local okL, linked = pcall(_G.C_TradeSkillUI.IsTradeSkillLinked)
+        if okL and linked then return nil, nil end
+    end
+    if _G.C_TradeSkillUI.IsTradeSkillGuild then
+        local okG, guild = pcall(_G.C_TradeSkillUI.IsTradeSkillGuild)
+        if okG and guild then return nil, nil end
+    end
+    if _G.C_TradeSkillUI.IsNPCCrafting then
+        local okN, npc = pcall(_G.C_TradeSkillUI.IsNPCCrafting)
+        if okN and npc then return nil, nil end
+    end
+    if _G.C_TradeSkillUI.IsTradeSkillReady then
+        local okR, ready = pcall(_G.C_TradeSkillUI.IsTradeSkillReady)
+        if okR and not ready then return nil, nil end
+    end
+    local okIds, ids = pcall(_G.C_TradeSkillUI.GetAllRecipeIDs)
+    if not okIds or type(ids) ~= "table" or #ids == 0 then
+        return nil, nil
+    end
+    if _G.C_TradeSkillUI.GetBaseProfessionInfo then
+        local okP, pInfo = pcall(_G.C_TradeSkillUI.GetBaseProfessionInfo)
+        if okP and type(pInfo) == "table" then
+            local pid = (type(pInfo.parentProfessionID) == "number" and pInfo.parentProfessionID > 0) and pInfo.parentProfessionID or pInfo.professionID
+            local pname = pInfo.parentProfessionName or pInfo.professionName
+            local skillLine = LL.RecipeDatabase.ResolveSkillLineId(pid or pname)
+            if skillLine then
+                return skillLine, tonumber(pInfo.skillLevel) or nil
+            end
+        end
+    end
+    if _G.C_TradeSkillUI.GetChildProfessionInfo then
+        local okC, cInfo = pcall(_G.C_TradeSkillUI.GetChildProfessionInfo)
+        if okC and type(cInfo) == "table" then
+            local pid = (type(cInfo.parentProfessionID) == "number" and cInfo.parentProfessionID > 0) and cInfo.parentProfessionID or cInfo.professionID
+            local pname = cInfo.parentProfessionName or cInfo.professionName
+            local skillLine = LL.RecipeDatabase.ResolveSkillLineId(pid or pname)
+            if skillLine then
+                return skillLine, tonumber(cInfo.skillLevel) or nil
+            end
+        end
+    end
+    return nil, nil
 end
 
 local function RecordSkillRank(skillLineOrName, rank, maxRank, fromChatSkillUp)
@@ -113,6 +212,10 @@ local function RecordSkillRank(skillLineOrName, rank, maxRank, fromChatSkillUp)
         cleanRank = existing.rank
         cleanMax = math.max(cleanMax, existing.maxRank or cleanRank)
         chatTs = existing.chatSkillUpAt
+    end
+
+    if not existing or existing.rank ~= cleanRank or existing.maxRank ~= cleanMax then
+        LL.RecipeScanner.InvalidateCache()
     end
 
     charSkills[skillLine] = {
@@ -134,13 +237,11 @@ local function ReconcileThresholdsWithLiveDifficulty(recipe, liveDiff, currentRa
     recipe.scannedAtRank = currentRank
 
     if liveDiff == "GRAY" then
-        -- Blizzard confirms this recipe is Trivial/Gray right now -> strictly enforce gray <= currentRank
         recipe.gray = math.min(recipe.gray or currentRank, currentRank)
         recipe.green = math.min(recipe.green or math.max(1, recipe.gray - 15), recipe.gray)
         recipe.yellow = math.min(recipe.yellow or math.max(1, recipe.green - 15), recipe.green)
         recipe.orange = math.min(recipe.orange or 1, recipe.yellow)
     elseif liveDiff == "GREEN" then
-        -- Blizzard confirms Green right now -> green <= currentRank < gray
         recipe.green = math.min(recipe.green or currentRank, currentRank)
         if not recipe.gray or recipe.gray <= currentRank then
             recipe.gray = currentRank + 10
@@ -148,7 +249,6 @@ local function ReconcileThresholdsWithLiveDifficulty(recipe, liveDiff, currentRa
         recipe.yellow = math.min(recipe.yellow or math.max(1, recipe.green - 15), recipe.green)
         recipe.orange = math.min(recipe.orange or 1, recipe.yellow)
     elseif liveDiff == "YELLOW" then
-        -- Blizzard confirms Yellow right now -> yellow <= currentRank < green <= gray
         recipe.yellow = math.min(recipe.yellow or currentRank, currentRank)
         if not recipe.green or recipe.green <= currentRank then
             recipe.green = currentRank + 10
@@ -158,7 +258,6 @@ local function ReconcileThresholdsWithLiveDifficulty(recipe, liveDiff, currentRa
         end
         recipe.orange = math.min(recipe.orange or 1, recipe.yellow)
     elseif liveDiff == "ORANGE" then
-        -- Blizzard confirms Orange right now -> orange <= currentRank < yellow
         recipe.orange = math.min(recipe.orange or currentRank, currentRank)
         if not recipe.yellow or recipe.yellow <= currentRank then
             recipe.yellow = currentRank + 10
@@ -201,18 +300,17 @@ local function MergeStaticThresholds(recipe)
         recipe.gray = recipe.gray or static.gray
         recipe.source = recipe.source or static.source or "Trainer"
         recipe.isEnchant = (recipe.isEnchant == true) or (static.isEnchant == true)
+        recipe.hasStaticThresholds = true
 
-        -- Only reconcile against live difficulty when player has reached the recipe's minSkill
         if normLive and currentRank >= (recipe.minSkill or 1) then
             ReconcileThresholdsWithLiveDifficulty(recipe, normLive, currentRank)
         end
     else
-        -- Unknown recipe not in static catalog: NEVER fabricate ORANGE when live difficulty is nil/unknown!
         local diff = normLive or "GRAY"
         recipe.liveDifficulty = diff
         recipe.scannedAtRank = currentRank
+        recipe.hasStaticThresholds = false
         if recipe.learned == false and minReq > currentRank then
-            -- Future trainer recipe (minSkill > currentRank): anchor thresholds at minReq, never at currentRank!
             recipe.orange = recipe.orange or minReq
             recipe.yellow = recipe.yellow or (minReq + 15)
             recipe.green = recipe.green or (minReq + 25)
@@ -281,7 +379,9 @@ function LL.RecipeScanner.ScanTrainerWindow()
     end
 
     local recorded = 0
+    local newlyLearnedSkillLine = nil
     local now = (_G.time and _G.time()) or 0
+    local charRecipes = EnsureCharTables()
 
     for i = 1, numServices do
         local okInfo, sName, _, sType = pcall(_G.GetTrainerServiceInfo, i)
@@ -301,8 +401,21 @@ function LL.RecipeScanner.ScanTrainerWindow()
                 local cleanName = StripRecipePrefix(sName)
                 local key = cleanName:lower()
                 if sType == "used" then
-                    -- Already learned by player; remove from pending trainer list
-                    trainerTbl[key] = nil
+                    if trainerTbl[key] ~= nil then
+                        trainerTbl[key] = nil
+                        -- Check if this newly learned recipe is already scanned as learned in charRecipes
+                        local alreadyScannedLearned = false
+                        for _, rec in pairs(charRecipes) do
+                            if type(rec) == "table" and rec.skillLine == skillLine and rec.learned ~= false
+                                and StripRecipePrefix(rec.name or ""):lower() == key then
+                                alreadyScannedLearned = true
+                                break
+                            end
+                        end
+                        if not alreadyScannedLearned then
+                            newlyLearnedSkillLine = skillLine
+                        end
+                    end
                 elseif sType == "available" or sType == "unavailable" then
                     local cost = 0
                     if _G.GetTrainerServiceCost then
@@ -334,8 +447,17 @@ function LL.RecipeScanner.ScanTrainerWindow()
         end
     end
 
-    if recorded > 0 then
+    if newlyLearnedSkillLine then
+        local loadedLine = GetLoadedModernSkillLine()
+        if loadedLine == newlyLearnedSkillLine then
+            LL.RecipeScanner.ScanModernTradeSkillUI()
+        else
+            RecordProfessionScanMeta(newlyLearnedSkillLine, nil, nil, true, "NEW_RECIPE_LEARNED")
+        end
+        LL.RecipeScanner.InvalidateCache()
+    elseif recorded > 0 then
         LL.RecipeScanner.ScanModernTradeSkillUI()
+        LL.RecipeScanner.InvalidateCache()
     end
 
     return recorded
@@ -392,7 +514,6 @@ function LL.RecipeScanner.GetProfessionSkill(skillLineOrName)
     if skillLine and skills[skillLine] then
         local rank = skills[skillLine].rank
         local maxRank = skills[skillLine].maxRank
-        -- Guard against CHAT_MSG_SKILL arriving slightly ahead of GetProfessionInfo/SKILL_LINES_CHANGED
         local _, charSkills = EnsureCharTables()
         local cached = charSkills[skillLine]
         local now = (_G.time and _G.time()) or 0
@@ -522,6 +643,12 @@ function LL.RecipeScanner.ScanLegacyTradeSkill()
         end
     end
 
+    if scanned > 0 and skillLine then
+        local liveRank = LL.RecipeScanner.GetProfessionSkill(skillLine) or rank
+        RecordProfessionScanMeta(skillLine, liveRank, scanned, false)
+        LL.RecipeScanner.InvalidateCache()
+    end
+
     return scanned
 end
 
@@ -581,13 +708,16 @@ function LL.RecipeScanner.ScanModernTradeSkillUI()
         end
     end
     if windowSkillLine and (windowSkillRank or 0) > 0 then
-        RecordSkillRank(windowSkillLine, windowSkillRank, windowMaxRank)
+        local recSkill = RecordSkillRank(windowSkillLine, windowSkillRank, windowMaxRank)
+        if recSkill and recSkill.rank then
+            windowSkillRank = recSkill.rank
+        end
     end
 
     local charRecipes = EnsureCharTables()
     local scanned = 0
+    local scannedByLine = {}
 
-    -- Purge any unlearned charRecipes in this profession that are no longer verified via a Trainer scan
     if windowSkillLine then
         local winTrainerTbl = EnsureTrainerTable(windowSkillLine)
         for key, existing in pairs(charRecipes) do
@@ -626,6 +756,11 @@ function LL.RecipeScanner.ScanModernTradeSkillUI()
                 end
             end
 
+            local effectiveRank = LL.RecipeScanner.GetProfessionSkill(rSkillLine or rProfName) or rRank or 1
+            if rRank and rRank > effectiveRank then
+                effectiveRank = rRank
+            end
+
             local cleanKey = StripRecipePrefix(info.name or ""):lower()
             local trainerTbl = rSkillLine and EnsureTrainerTable(rSkillLine) or nil
             local trainerEntry = (not isLearned and trainerTbl) and trainerTbl[cleanKey] or nil
@@ -633,26 +768,29 @@ function LL.RecipeScanner.ScanModernTradeSkillUI()
                 trainerTbl[cleanKey] = nil
             end
 
-            -- STRICT WoW: Forever rule:
-            -- 1. Always store learned recipes (including GRAY so we know they're trivial).
-            -- 2. NEVER accept arbitrary unlearned C_TradeSkillUI recipes (which include phase-locked,
-            --    raid/world drops, rep recipes, and 300-skill recipes with no minSkill).
-            --    ONLY include unlearned recipes explicitly verified at a WoW: Forever Profession Trainer!
             if isLearned or (trainerEntry and normDiff and normDiff ~= "GRAY") then
                 local schematic = _G.C_TradeSkillUI.GetRecipeSchematic and _G.C_TradeSkillUI.GetRecipeSchematic(recipeID, false)
                 local outputItemId = (schematic and schematic.outputItemID) or info.itemID
                 local reagents = {}
+                local basicReagentType = _G.Enum and _G.Enum.CraftingReagentType and _G.Enum.CraftingReagentType.Basic
                 if schematic and type(schematic.reagentSlotSchematics) == "table" then
                     for _, slot in ipairs(schematic.reagentSlotSchematics) do
-                        local rItemId = slot.reagents and slot.reagents[1] and slot.reagents[1].itemID
-                        local rCount = slot.quantityRequired or 1
-                        if rItemId and rItemId > 0 and rCount > 0 then
-                            local meta = LL.VendorDatabase.GetItemMetadata(rItemId)
-                            table.insert(reagents, {
-                                itemId = rItemId,
-                                name = (meta and meta.name) or string.format("Item #%d", rItemId),
-                                count = rCount,
-                            })
+                        local isOptional = (slot.required == false)
+                        if not isOptional and basicReagentType ~= nil and slot.reagentType ~= nil
+                            and slot.reagentType ~= basicReagentType and slot.required ~= true then
+                            isOptional = true
+                        end
+                        if not isOptional then
+                            local rItemId = slot.reagents and slot.reagents[1] and slot.reagents[1].itemID
+                            local rCount = slot.quantityRequired or 1
+                            if rItemId and rItemId > 0 and rCount > 0 then
+                                local meta = LL.VendorDatabase.GetItemMetadata(rItemId)
+                                table.insert(reagents, {
+                                    itemId = rItemId,
+                                    name = (meta and meta.name) or string.format("Item #%d", rItemId),
+                                    count = rCount,
+                                })
+                            end
                         end
                     end
                 end
@@ -677,17 +815,32 @@ function LL.RecipeScanner.ScanModernTradeSkillUI()
                         liveDifficulty = normDiff,
                         relativeDifficulty = info.relativeDifficulty,
                         numSkillUps = info.numSkillUps,
-                        scannedAtRank = rRank or LL.RecipeScanner.GetProfessionSkill(rSkillLine or rProfName) or 1,
+                        scannedAtRank = effectiveRank,
                         outputItemId = (outputItemId and outputItemId > 0) and outputItemId or nil,
                         outputQty = (minMade + maxMade) / 2,
                         reagents = reagents,
                     })
                     if saved then
                         scanned = scanned + 1
+                        if rSkillLine and isLearned then
+                            scannedByLine[rSkillLine] = (scannedByLine[rSkillLine] or 0) + 1
+                        end
                     end
                 end
             end
         end
+    end
+
+    if scanned > 0 then
+        for sLine, count in pairs(scannedByLine) do
+            local rk = LL.RecipeScanner.GetProfessionSkill(sLine) or windowSkillRank or 1
+            RecordProfessionScanMeta(sLine, rk, count, false)
+        end
+        if windowSkillLine and not scannedByLine[windowSkillLine] then
+            local rk = LL.RecipeScanner.GetProfessionSkill(windowSkillLine) or windowSkillRank or 1
+            RecordProfessionScanMeta(windowSkillLine, rk, scanned, false)
+        end
+        LL.RecipeScanner.InvalidateCache()
     end
 
     return scanned
@@ -701,8 +854,194 @@ function LL.RecipeScanner.ScanCurrentProfessionWindow()
     return count
 end
 
--- Returns known + trainer-available recipes for a profession.
--- Each entry has .learned (true/false) and .needsTrainer (true when unlearned Trainer/Vendor recipe).
+-- Evaluates whether `skillLine` has up-to-date WoW: Forever recipes & orange/yellow/green/gray states.
+-- Returns: status ("READY" | "UNSCANNED" | "NEEDS_RESCAN"), detailsTable
+function LL.RecipeScanner.GetProfessionScanStatus(skillLineOrName)
+    local active = LL.RecipeScanner.GetActiveProfession()
+    local skillLine = LL.RecipeDatabase.ResolveSkillLineId(skillLineOrName) or active.skillLine or 164
+    local profName = LL.RecipeDatabase.GetProfessionName(skillLine) or active.name or "Profession"
+    local liveRank = LL.RecipeScanner.GetProfessionSkill(skillLine) or active.rank or 1
+
+    -- If C_TradeSkillUI currently has this profession loaded in client memory, sync it immediately!
+    local loadedModernLine = GetLoadedModernSkillLine()
+    if loadedModernLine == skillLine then
+        local charRecipes, _, _, charProfScans = EnsureCharTables()
+        local meta = charProfScans[skillLine]
+        if not meta or meta.needsRescan or meta.scannedRank ~= liveRank then
+            LL.RecipeScanner.ScanModernTradeSkillUI()
+        end
+    end
+
+    local charRecipes, _, _, charProfScans = EnsureCharTables()
+    local learnedCount = 0
+    local maxScannedAtRank = nil
+    local hasDynamicThresholds = false
+
+    for _, rec in pairs(charRecipes) do
+        if type(rec) == "table" and rec.skillLine == skillLine and rec.learned ~= false then
+            learnedCount = learnedCount + 1
+            local sr = tonumber(rec.scannedAtRank)
+            if sr and (not maxScannedAtRank or sr > maxScannedAtRank) then
+                maxScannedAtRank = sr
+            end
+            if not rec.hasStaticThresholds and rec.liveDifficulty ~= "GRAY" then
+                hasDynamicThresholds = true
+            end
+        end
+    end
+
+    local staticCatalog = LL.RecipeDatabase.GetRecipesForProfession(skillLine)
+    local scanMeta = charProfScans[skillLine]
+    local scannedRank = (scanMeta and tonumber(scanMeta.scannedRank)) or maxScannedAtRank
+
+    if learnedCount == 0 and #staticCatalog == 0 then
+        return "UNSCANNED", {
+            status = "UNSCANNED",
+            skillLine = skillLine,
+            profession = profName,
+            currentRank = liveRank,
+            scannedRank = nil,
+            learnedCount = 0,
+            reason = "NEVER_SCANNED",
+        }
+    end
+
+    if scanMeta and scanMeta.needsRescan then
+        return "NEEDS_RESCAN", {
+            status = "NEEDS_RESCAN",
+            skillLine = skillLine,
+            profession = profName,
+            currentRank = liveRank,
+            scannedRank = scannedRank,
+            learnedCount = learnedCount,
+            reason = scanMeta.rescanReason or "NEW_RECIPE_LEARNED",
+        }
+    end
+
+    if hasDynamicThresholds and scannedRank and scannedRank ~= liveRank and loadedModernLine ~= skillLine then
+        return "NEEDS_RESCAN", {
+            status = "NEEDS_RESCAN",
+            skillLine = skillLine,
+            profession = profName,
+            currentRank = liveRank,
+            scannedRank = scannedRank,
+            learnedCount = learnedCount,
+            reason = "SKILL_RANK_CHANGED",
+        }
+    end
+
+    return "READY", {
+        status = "READY",
+        skillLine = skillLine,
+        profession = profName,
+        currentRank = liveRank,
+        scannedRank = scannedRank or liveRank,
+        learnedCount = learnedCount,
+        reason = "OK",
+    }
+end
+
+local function CloseBackgroundTradeSkillWindow()
+    if _G.InCombatLockdown and _G.InCombatLockdown() then return end
+    if _G.C_TradeSkillUI and type(_G.C_TradeSkillUI.CloseTradeSkill) == "function" then
+        pcall(_G.C_TradeSkillUI.CloseTradeSkill)
+    end
+    if _G.ProfessionsFrame and _G.ProfessionsFrame.Hide then
+        pcall(_G.ProfessionsFrame.Hide, _G.ProfessionsFrame)
+    end
+    if _G.CloseTradeSkill then
+        pcall(_G.CloseTradeSkill)
+    end
+    if _G.TradeSkillFrame and _G.TradeSkillFrame.Hide then
+        pcall(_G.TradeSkillFrame.Hide, _G.TradeSkillFrame)
+    end
+end
+
+-- Opens `skillLine` to scan live WoW: Forever recipes & orange/yellow/green/gray difficulties.
+-- When `closeAfterScan == true` and the profession frame wasn't already open, closes it automatically
+-- once the scan completes.
+function LL.RecipeScanner.SyncProfessionRecipes(skillLineOrName, options)
+    options = options or {}
+    local active = LL.RecipeScanner.GetActiveProfession()
+    local skillLine = LL.RecipeDatabase.ResolveSkillLineId(skillLineOrName) or active.skillLine or 164
+    local profName = LL.RecipeDatabase.GetProfessionName(skillLine) or active.name or "Profession"
+
+    -- 1. Try zero-UI sync if C_TradeSkillUI / TradeSkillFrame already holds this profession
+    LL.RecipeScanner.ScanCurrentProfessionWindow()
+    local status = LL.RecipeScanner.GetProfessionScanStatus(skillLine)
+    if status == "READY" and not options.forceOpen then
+        return true, "READY"
+    end
+
+    if not options.allowOpenWindow then
+        return false, status
+    end
+    if _G.InCombatLockdown and _G.InCombatLockdown() then
+        if not options.quiet then
+            print(string.format("|cffff9900[Leveling Lad]|r Cannot open %s during combat.", profName))
+        end
+        return false, "COMBAT"
+    end
+
+    -- Never auto-pop ProfessionsFrame unprompted while AuctionHouseFrame is open unless user explicitly clicked to open it,
+    -- because WoW's UIPanel layout can close AuctionHouseFrame when ProfessionsFrame opens.
+    local ahOpen = LL.AHVerifier and LL.AHVerifier.IsAuctionHouseOpen and LL.AHVerifier.IsAuctionHouseOpen()
+    if ahOpen and not options.userClickedScan then
+        return false, status
+    end
+
+    local wasShown = IsProfessionFrameShown()
+    local shouldCloseAfter = (options.closeAfterScan == true) and (not wasShown) and (not ahOpen)
+
+    pendingBackgroundScan = {
+        skillLine = skillLine,
+        profession = profName,
+        closeAfterScan = shouldCloseAfter,
+        onComplete = options.onComplete,
+        expiresAt = ((_G.GetTime and _G.GetTime()) or 0) + 3.0,
+    }
+
+    local opened = false
+    if _G.C_TradeSkillUI and _G.C_TradeSkillUI.OpenTradeSkill then
+        local okOpen, res = pcall(_G.C_TradeSkillUI.OpenTradeSkill, skillLine)
+        if okOpen and res ~= false then
+            opened = true
+        end
+    end
+
+    if not opened then
+        local castName = (profName == "Mining") and "Smelting" or profName
+        if castName and _G.CastSpellByName then
+            local okCast = pcall(_G.CastSpellByName, castName)
+            opened = okCast
+        end
+    end
+
+    if not opened then
+        pendingBackgroundScan = nil
+        return false, status
+    end
+
+    -- Check if scan succeeded synchronously (e.g., cached client data source or test environment)
+    local scannedNow = LL.RecipeScanner.ScanCurrentProfessionWindow()
+    local afterStatus = LL.RecipeScanner.GetProfessionScanStatus(skillLine)
+    if scannedNow > 0 and afterStatus == "READY" then
+        local cb = pendingBackgroundScan and pendingBackgroundScan.onComplete
+        local doClose = pendingBackgroundScan and pendingBackgroundScan.closeAfterScan
+        pendingBackgroundScan = nil
+        if doClose then
+            CloseBackgroundTradeSkillWindow()
+        end
+        if type(cb) == "function" then
+            pcall(cb, skillLine)
+        end
+        return true, "READY"
+    end
+
+    return true, "SCANNING"
+end
+
+-- Returns known + trainer-available recipes for a profession (memoized per revision & skill rank).
 function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTrainer)
     local skillLine = LL.RecipeDatabase.ResolveSkillLineId(skillLineOrName)
     if not skillLine then return {} end
@@ -712,14 +1051,27 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
         includeTrainer = (settings.includeTrainerRecipes ~= false)
     end
 
+    local liveRank = LL.RecipeScanner.GetProfessionSkill(skillLine)
+    local loadedModernLine = GetLoadedModernSkillLine()
+    local cacheKey = string.format("%d:%s:%s:%s:%d",
+        skillLine,
+        tostring(includeTrainer == true),
+        tostring(liveRank or 0),
+        tostring(loadedModernLine or 0),
+        recipeCacheRevision
+    )
+    if loadedModernLine ~= skillLine and professionRecipesCache[cacheKey] then
+        return professionRecipesCache[cacheKey]
+    end
+
     local list = {}
     local seenById = {}
     local seenByName = {}
 
-    -- 1. Character's scanned live WoW: Forever recipes (learned + trainer-verified unlearned)
     local charRecipes = EnsureCharTables()
     local trainerTbl = EnsureTrainerTable(skillLine)
-    local liveRank = LL.RecipeScanner.GetProfessionSkill(skillLine)
+    local refreshedLiveCount = 0
+
     for _, rec in pairs(charRecipes) do
         if type(rec) == "table" and rec.skillLine == skillLine then
             local isLearned = (rec.learned ~= false)
@@ -732,9 +1084,10 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
             end
 
             if isLearned or (includeTrainer and isVerifiedTrainer) then
-                -- Refresh live difficulty on-demand from C_TradeSkillUI when player meets minSkill
+                -- Only query C_TradeSkillUI.GetRecipeInfo on-demand when C_TradeSkillUI actively holds `skillLine`
                 local minReq = tonumber(rec.minSkill) or 1
-                if type(rec.recipeId) == "number" and rec.recipeId > 0
+                if loadedModernLine == skillLine
+                    and type(rec.recipeId) == "number" and rec.recipeId > 0
                     and liveRank and liveRank >= minReq
                     and _G.C_TradeSkillUI and _G.C_TradeSkillUI.GetRecipeInfo then
                     local okI, rInfo = pcall(_G.C_TradeSkillUI.GetRecipeInfo, rec.recipeId)
@@ -742,6 +1095,9 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
                         local freshDiff = LL.RecipeScanner.NormalizeLiveDifficulty(rInfo.difficulty, rInfo.relativeDifficulty, rInfo.numSkillUps)
                         if freshDiff then
                             ReconcileThresholdsWithLiveDifficulty(rec, freshDiff, liveRank)
+                            if isLearned then
+                                refreshedLiveCount = refreshedLiveCount + 1
+                            end
                         end
                     end
                 end
@@ -759,7 +1115,10 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
         end
     end
 
-    -- 2. Static catalog recipes (marked needsTrainer if not scanned as learned, or known if no scan yet)
+    if refreshedLiveCount > 0 and liveRank then
+        RecordProfessionScanMeta(skillLine, liveRank, refreshedLiveCount, false)
+    end
+
     local hasScannedAny = (#list > 0)
     local catalog = LL.RecipeDatabase.GetRecipesForProfession(skillLine)
     for _, base in ipairs(catalog) do
@@ -774,6 +1133,7 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
                 for k, v in pairs(base) do copy[k] = v end
                 copy.learned = (not hasScannedAny)
                 copy.needsTrainer = hasScannedAny and isTrainerSource
+                copy.hasStaticThresholds = true
                 table.insert(list, copy)
             end
         end
@@ -786,6 +1146,7 @@ function LL.RecipeScanner.GetRecipesForProfession(skillLineOrName, includeTraine
         return (a.recipeId or 0) < (b.recipeId or 0)
     end)
 
+    professionRecipesCache[cacheKey] = list
     return list
 end
 
@@ -841,7 +1202,6 @@ function LL.RecipeScanner.OpenRecipe(recipe)
 
     local skillLineID = recipe.skillLine or LL.RecipeDatabase.ResolveSkillLineId(recipe.profession)
 
-    -- 1. Modern C_TradeSkillUI path
     if _G.C_TradeSkillUI and (_G.C_TradeSkillUI.OpenTradeSkill or _G.C_TradeSkillUI.OpenRecipe) then
         local opened = false
         if skillLineID and _G.C_TradeSkillUI.OpenTradeSkill then
@@ -868,11 +1228,11 @@ function LL.RecipeScanner.OpenRecipe(recipe)
         end
 
         if opened then
+            LL.RecipeScanner.ScanCurrentProfessionWindow()
             return true
         end
     end
 
-    -- 2. Legacy TradeSkillFrame fallback
     local profName = recipe.profession or LL.RecipeDatabase.GetProfessionName(skillLineID)
     if profName == "Mining" then profName = "Smelting" end
     if profName and _G.CastSpellByName then
@@ -902,7 +1262,6 @@ function LL.RecipeScanner.CraftRecipe(recipe, quantity)
 
     quantity = math.max(1, math.floor(tonumber(quantity) or 1))
 
-    -- Smart Guard: halt if active leveling play already hit target skill!
     local activePlay = LevelingLad_DB and LevelingLad_DB.activePlay
     if activePlay and activePlay.targetSkill and activePlay.recipe and activePlay.recipe.recipeId == recipe.recipeId then
         local apiSkill = LL.RecipeScanner.GetProfessionSkill(activePlay.skillLine or recipe.skillLine) or 0
@@ -916,12 +1275,13 @@ function LL.RecipeScanner.CraftRecipe(recipe, quantity)
         end
     end
 
-    -- 1. Modern C_TradeSkillUI path
     if _G.C_TradeSkillUI and _G.C_TradeSkillUI.CraftRecipe then
         local targetId = FindModernRecipeId(recipe)
-        local frameShown = (_G.ProfessionsFrame and _G.ProfessionsFrame.IsShown and _G.ProfessionsFrame:IsShown())
-            or (_G.TradeSkillFrame and _G.TradeSkillFrame.IsShown and _G.TradeSkillFrame:IsShown())
-        if targetId and (frameShown or not _G.ProfessionsFrame) then
+        local frameShown = IsProfessionFrameShown()
+        local loadedLine = GetLoadedModernSkillLine()
+        local expectedLine = recipe.skillLine or LL.RecipeDatabase.ResolveSkillLineId(recipe.profession)
+        local profMatches = (not expectedLine or not loadedLine or loadedLine == expectedLine)
+        if targetId and profMatches and (frameShown or not _G.ProfessionsFrame) then
             local ok = pcall(_G.C_TradeSkillUI.CraftRecipe, targetId, quantity)
             if ok then
                 print(string.format("|cff00ccff[Leveling Lad]|r Crafting %dx [%s]...", quantity, recipe.name or ("Recipe #" .. tostring(targetId))))
@@ -934,7 +1294,6 @@ function LL.RecipeScanner.CraftRecipe(recipe, quantity)
         end
     end
 
-    -- 2. Legacy DoTradeSkill fallback
     if _G.GetNumTradeSkills and _G.GetTradeSkillInfo and _G.DoTradeSkill then
         local num = _G.GetNumTradeSkills() or 0
         for i = 1, num do
@@ -955,6 +1314,9 @@ end
 
 -- Parses CHAT_MSG_SKILL messages, updates cached rank, and triggers smart target-reached alerts
 function LL.RecipeScanner.HandleSkillMessage(message)
+    if message == nil or (LL.IsSecret and LL.IsSecret(message)) then
+        return nil, nil
+    end
     if type(message) ~= "string" or message == "" then return nil, nil end
     local pattern = BuildSkillUpPattern()
     local profName, newSkillStr = message:match(pattern)
@@ -974,6 +1336,11 @@ function LL.RecipeScanner.HandleSkillMessage(message)
         prevSkill = existing and tonumber(existing.rank) or nil
         local maxRank = existing and existing.maxRank or LL.GetNextMilestone(newSkill - 1)
         RecordSkillRank(skillLine, newSkill, math.max(maxRank, newSkill), true)
+
+        -- If C_TradeSkillUI already holds this profession, refresh live recipe difficulties immediately
+        if GetLoadedModernSkillLine() == skillLine then
+            LL.RecipeScanner.ScanModernTradeSkillUI()
+        end
     end
 
     local goalReached = false
@@ -983,7 +1350,6 @@ function LL.RecipeScanner.HandleSkillMessage(message)
         local customGoal = settings and settings.targetMode == "CUSTOM" and tonumber(settings.customTargetSkill) or nil
         local trackedGoal = activePlay.goalTargetSkill or activePlay.requestedTargetSkill or activePlay.reachedSkill or activePlay.targetSkill
         if customGoal and customGoal ~= trackedGoal then
-            -- Stale activePlay from an older goal setting; clear silently
             LevelingLad_DB.activePlay = nil
         else
             local priorSkill = tonumber(activePlay.liveSkill) or prevSkill or tonumber(activePlay.startSkill) or 0
@@ -1001,14 +1367,18 @@ function LL.RecipeScanner.HandleSkillMessage(message)
         end
     end
 
-    -- Refresh cached Top 5 plays for the new skill level so SideWindow skill ranges update live
     if skillLine and LevelingLad_DB and LL.LevelingEngine and LL.LevelingEngine.FindTopPlays then
         local activeProf = LL.RecipeScanner.GetActiveProfession()
         local verifierBusy = LL.AHVerifier and LL.AHVerifier.IsRunning and LL.AHVerifier.IsRunning()
         if activeProf and activeProf.skillLine == skillLine and not verifierBusy then
             local dataStatus = LL.GetAHDataStatus and LL.GetAHDataStatus() or "FRESH"
-            if dataStatus ~= "NO_DATA" then
-                LevelingLad_DB.lastTopPlays = LL.LevelingEngine.FindTopPlays(skillLine, newSkill)
+            local scanStatus = LL.RecipeScanner.GetProfessionScanStatus(skillLine)
+            if dataStatus ~= "NO_DATA" and scanStatus == "READY" then
+                local topPlays, evaluated = LL.LevelingEngine.FindTopPlays(skillLine, newSkill)
+                LevelingLad_DB.lastTopPlays = topPlays
+                if LL.AHVerifier and LL.AHVerifier.StoreEvaluatedPool then
+                    LL.AHVerifier.StoreEvaluatedPool(skillLine, evaluated)
+                end
             end
         end
     end
@@ -1020,7 +1390,9 @@ function LL.RecipeScanner.HandleSkillMessage(message)
     if LL.DetailWindow and LL.DetailWindow.OnSkillUp then
         LL.DetailWindow.OnSkillUp(profName, newSkill, skillLine, goalReached)
     end
-    if LL.SideWindow and LL.SideWindow.Refresh then
+    if LL.SideWindow and LL.SideWindow.RefreshIfShown then
+        LL.SideWindow.RefreshIfShown()
+    elseif LL.SideWindow and LL.SideWindow.Refresh then
         LL.SideWindow.Refresh()
     end
 
@@ -1030,8 +1402,10 @@ end
 -- Diagnostic helper (/ll debug): prints raw WoW: Forever C_TradeSkillUI difficulty enums & sample recipes
 function LL.RecipeScanner.DebugDump()
     local active = LL.RecipeScanner.GetActiveProfession()
-    print(string.format("|cff00ccff[Leveling Lad Debug]|r Active: %s (id=%s) Skill: %d/%d",
-        tostring(active.name), tostring(active.skillLine), tonumber(active.rank) or 0, tonumber(active.maxRank) or 0))
+    local scanStatus, scanInfo = LL.RecipeScanner.GetProfessionScanStatus(active.skillLine)
+    print(string.format("|cff00ccff[Leveling Lad Debug]|r Active: %s (id=%s) Skill: %d/%d | Scan: %s (scannedRank=%s)",
+        tostring(active.name), tostring(active.skillLine), tonumber(active.rank) or 0, tonumber(active.maxRank) or 0,
+        tostring(scanStatus), tostring(scanInfo and scanInfo.scannedRank)))
 
     local enumTbl = _G.Enum and (
         _G.Enum.TradeskillRelativeDifficulty
@@ -1093,6 +1467,8 @@ function LL.RecipeScanner.Init()
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_UPDATE")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_DATA_SOURCE_CHANGED")
+        pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
+        pcall(frame.RegisterEvent, frame, "NEW_RECIPE_LEARNED")
         pcall(frame.RegisterEvent, frame, "TRAINER_SHOW")
         pcall(frame.RegisterEvent, frame, "TRAINER_UPDATE")
         pcall(frame.RegisterEvent, frame, "SKILL_LINES_CHANGED")
@@ -1101,37 +1477,84 @@ function LL.RecipeScanner.Init()
 
         frame:SetScript("OnEvent", function(_, event, arg1)
             if event == "CHAT_MSG_SKILL" then
+                if LL.IsSecret and LL.IsSecret(arg1) then return end
                 LL.RecipeScanner.HandleSkillMessage(arg1)
+                return
+            end
+
+            if event == "NEW_RECIPE_LEARNED" then
+                local scanned = LL.RecipeScanner.ScanCurrentProfessionWindow()
+                if scanned == 0 then
+                    local active = LL.RecipeScanner.GetActiveProfession()
+                    if active and active.skillLine then
+                        RecordProfessionScanMeta(active.skillLine, nil, nil, true, "NEW_RECIPE_LEARNED")
+                        LL.RecipeScanner.InvalidateCache()
+                    end
+                end
+                if LL.SideWindow and LL.SideWindow.RefreshIfShown then
+                    LL.SideWindow.RefreshIfShown()
+                end
                 return
             end
 
             if event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
                 LL.RecipeScanner.ScanTrainerWindow()
-                if LL.SideWindow and LL.SideWindow.frame
-                    and (not LL.SideWindow.frame.IsShown or LL.SideWindow.frame:IsShown())
-                    and LL.SideWindow.Refresh then
-                    LL.SideWindow.Refresh()
+                if LL.SideWindow and LL.SideWindow.RefreshIfShown then
+                    LL.SideWindow.RefreshIfShown()
                 end
                 return
             end
 
             if event == "SKILL_LINES_CHANGED" or event == "PLAYER_ENTERING_WORLD" then
                 LL.RecipeScanner.GetCharacterProfessions()
-                if LL.SideWindow and LL.SideWindow.frame
-                    and (not LL.SideWindow.frame.IsShown or LL.SideWindow.frame:IsShown())
-                    and LL.SideWindow.Refresh then
-                    LL.SideWindow.Refresh()
+                if LL.SideWindow and LL.SideWindow.RefreshIfShown then
+                    LL.SideWindow.RefreshIfShown()
                 end
                 return
             end
 
-            LL.RecipeScanner.ScanCurrentProfessionWindow()
+            local scanned = LL.RecipeScanner.ScanCurrentProfessionWindow()
+            if scanned == 0 and not pendingScanRetry
+                and (event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED")
+                and _G.C_Timer and _G.C_Timer.After then
+                pendingScanRetry = true
+                _G.C_Timer.After(0.25, function()
+                    pendingScanRetry = false
+                    local retryCount = LL.RecipeScanner.ScanCurrentProfessionWindow()
+                    if retryCount > 0 and LL.SideWindow and LL.SideWindow.OnProfessionWindowScanned then
+                        LL.SideWindow.OnProfessionWindowScanned()
+                    end
+                end)
+            end
+
+            if pendingBackgroundScan then
+                local now = (_G.GetTime and _G.GetTime()) or 0
+                if pendingBackgroundScan.expiresAt and now > pendingBackgroundScan.expiresAt then
+                    pendingBackgroundScan = nil
+                elseif scanned > 0 then
+                    local req = pendingBackgroundScan
+                    local st = LL.RecipeScanner.GetProfessionScanStatus(req.skillLine)
+                    if st == "READY" then
+                        pendingBackgroundScan = nil
+                        if req.closeAfterScan then
+                            CloseBackgroundTradeSkillWindow()
+                        end
+                        if type(req.onComplete) == "function" then
+                            pcall(req.onComplete, req.skillLine)
+                        end
+                    end
+                end
+            end
+
+            if scanned > 0 and LL.SideWindow and LL.SideWindow.OnProfessionWindowScanned then
+                LL.SideWindow.OnProfessionWindowScanned()
+            end
 
             if pendingOpenRecipe then
                 local now = (_G.GetTime and _G.GetTime()) or 0
                 if pendingOpenRecipe.expiresAt and now > pendingOpenRecipe.expiresAt then
                     pendingOpenRecipe = nil
-                elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" then
+                elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" or event == "TRADE_SKILL_LIST_UPDATE" then
                     local targetId = FindModernRecipeId(pendingOpenRecipe)
                     if targetId and _G.C_TradeSkillUI and _G.C_TradeSkillUI.OpenRecipe then
                         pcall(_G.C_TradeSkillUI.OpenRecipe, targetId)

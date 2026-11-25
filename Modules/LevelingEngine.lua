@@ -337,12 +337,10 @@ function LL.LevelingEngine.GetCraftRecoveryValue(recipe, options)
             local ahCut = LL.GetEffectiveAHCutRate and LL.GetEffectiveAHCutRate() or 0.05
             return math.floor((ahPrice * (1 - ahCut) * yield) + 0.5), "AH"
         end
-        -- Fallback to vendor floor when AH has no price for the output
         local vSell = LL.VendorDatabase.GetVendorSellPrice(recipe.outputItemId) or 0
         return math.floor((vSell * yield) + 0.5), "VENDOR"
     end
 
-    -- Default: VENDOR floor (guaranteed zero-risk recovery)
     local vendorSell = LL.VendorDatabase.GetVendorSellPrice(recipe.outputItemId) or 0
     return math.floor((vendorSell * yield) + 0.5), "VENDOR"
 end
@@ -371,7 +369,6 @@ function LL.LevelingEngine.GetUnitCraftEconomics(recipe, options)
     }
 end
 
--- Single-point expected CPSP for recipe at exact skill level `skill`
 function LL.LevelingEngine.GetSinglePointCPSP(recipe, skill, options)
     local p = LL.LevelingEngine.GetSkillupProbability(recipe, skill)
     if p <= 0 then return math.huge end
@@ -384,13 +381,6 @@ end
 -- 3. Dynamic Horizon & "The Green/Yellow Trap" Trainer Lookahead
 -- ============================================================================
 
--- Computes the optimal safe skill horizon for `recipe` starting from `currentSkill` up to `targetSkill`.
--- Enforces:
---   1. Hard Gray cutoff (never plans >= recipe.gray).
---   2. Trainer / better-recipe lookahead ("The Green/Yellow Trap"):
---      If `recipe` transitions to Yellow/Green (or a new recipe unlocks at skill `s`) and another
---      eligible recipe available at skill `s` has strictly lower CPSP at `s`, caps strictly at `s`
---      and surfaces the trainer/recipe handoff step!
 function LL.LevelingEngine.CalculateDynamicHorizon(recipe, currentSkill, targetSkill, allCandidates, options)
     options = options or {}
     local gray = recipe.gray or 0
@@ -406,7 +396,6 @@ function LL.LevelingEngine.CalculateDynamicHorizon(recipe, currentSkill, targetS
     local capReason = (maxEnd == gray and targetSkill > gray) and "GRAY_CAP" or "TARGET_REACHED"
     local handoff = nil
 
-    -- Precompute unit economics for candidate recipes to keep lookahead fast
     local econCache = options._econCache or {}
     local function FastPointCPSP(r, s)
         local p = LL.LevelingEngine.GetSkillupProbability(r, s)
@@ -440,9 +429,6 @@ function LL.LevelingEngine.CalculateDynamicHorizon(recipe, currentSkill, targetS
                         local otherState = LL.LevelingEngine.GetDifficultyState(other, s)
                         local otherCPSP = FastPointCPSP(other, s)
 
-                        -- Trigger handoff if:
-                        --  (a) A cheaper recipe unlocks or becomes superior when current recipe transitions (Yellow/Green trap)
-                        --  (b) In SAFE mode, current recipe just hit GREEN while an ORANGE/YELLOW recipe is available
                         local isCheaper = (otherCPSP + EPSILON < bestAltCPSP)
                         local safeEscapeGreen = (riskTolerance == "SAFE" and transitioned and currState == "GREEN"
                             and (otherState == "ORANGE" or otherState == "YELLOW")
@@ -492,13 +478,20 @@ function LL.LevelingEngine.ComputeLiveInventoryState(play)
         local inBags = (LL.Formatter and LL.Formatter.GetInventoryCount and LL.Formatter.GetInventoryCount(item.itemId, false)) or 0
         local withBank = (LL.Formatter and LL.Formatter.GetInventoryCount and LL.Formatter.GetInventoryCount(item.itemId, true)) or inBags
         local inBank = math.max(0, withBank - inBags)
-        local inMail = (LL.AHVerifier and LL.AHVerifier.GetPurchasedInMailCount and LL.AHVerifier.GetPurchasedInMailCount(item.itemId)) or 0
+        local inMail, mailSpent = 0, 0
+        if LL.AHVerifier and LL.AHVerifier.GetPurchasedInMailInfo then
+            inMail, mailSpent = LL.AHVerifier.GetPurchasedInMailInfo(item.itemId)
+        elseif LL.AHVerifier and LL.AHVerifier.GetPurchasedInMailCount then
+            inMail = LL.AHVerifier.GetPurchasedInMailCount(item.itemId) or 0
+        end
         local need = item.totalQuantity or 0
         local toBuy = math.max(0, need - inBags - inMail)
 
         item.haveInBags = inBags
         item.haveInBank = inBank
         item.inMail = inMail
+        item.purchasedInMail = inMail
+        item.mailSpentCopper = mailSpent
         item.remainingToBuy = toBuy
         item.ready = (toBuy <= 0)
         if not item.ready then
@@ -509,7 +502,6 @@ function LL.LevelingEngine.ComputeLiveInventoryState(play)
     play.allMatsReady = allReady
     play.remainingBuyCost = totalCashRemaining
 
-    -- Compute how many crafts can be executed immediately from current bag contents
     local craftableNow = math.huge
     for _, item in ipairs(play.shoppingList) do
         local perCraft = math.max(1, item.countPerCraft or 1)
@@ -526,7 +518,7 @@ function LL.LevelingEngine.EvaluateCandidatePlay(recipe, currentSkill, targetSki
 
     local minSkill = recipe.minSkill or recipe.orange or 1
     if currentSkill < minSkill then return nil end
-    if currentSkill >= (recipe.gray or 0) then return nil end -- Strictly 0 crafts when Gray
+    if currentSkill >= (recipe.gray or 0) then return nil end
 
     local reagents = LL.RecipeDatabase.NormalizeReagents(recipe.reagents)
     if #reagents == 0 then return nil end
@@ -548,7 +540,6 @@ function LL.LevelingEngine.EvaluateCandidatePlay(recipe, currentSkill, targetSki
     local budgetCapped = false
     local supplyCapped = false
 
-    -- Try from full horizon down to 1 point to enforce hard budget cap & live AH supply limits
     for pts = maxPoints, 1, -1 do
         local tryEnd = currentSkill + pts
         local expectedCrafts, pointsGained, actualEnd, rawExpected =
@@ -575,7 +566,6 @@ function LL.LevelingEngine.EvaluateCandidatePlay(recipe, currentSkill, targetSki
                     break
                 end
 
-                -- Compute exact out-of-pocket spend for units still needing purchase
                 local buyCost = 0
                 if toBuy > 0 then
                     if toBuy == totalQty then
@@ -716,7 +706,36 @@ function LL.LevelingEngine.FormatPlaySummary(rank, play)
     )
 end
 
+-- Selects up to `limit` non-snoozed plays from an already sorted `evaluated` pool in O(M).
+function LL.LevelingEngine.SelectTopPlaysFromPool(evaluated, limit, ignoreSnoozed)
+    local settings = (LevelingLad_DB and LevelingLad_DB.settings) or {}
+    limit = limit or settings.topCount or 5
+    local topPlays = {}
+    if type(evaluated) ~= "table" then
+        return topPlays
+    end
+    local now = (_G.time and _G.time()) or 0
+    if not ignoreSnoozed and LL.PruneExpiredSnoozes then
+        LL.PruneExpiredSnoozes(now)
+    end
+
+    for _, p in ipairs(evaluated) do
+        local snoozed = (not ignoreSnoozed) and LL.IsPlaySnoozed and LL.IsPlaySnoozed(p, now)
+        if not snoozed then
+            local idx = #topPlays + 1
+            p.rank = idx
+            p.summaryLine = LL.LevelingEngine.FormatPlaySummary(idx, p)
+            table.insert(topPlays, p)
+            if idx >= limit then
+                break
+            end
+        end
+    end
+    return topPlays
+end
+
 -- Finds the Top N (default 5) cheapest leveling plays for the profession at currentSkill.
+-- Hides snoozed plays from Top N unless `options.ignoreSnoozed == true` (Milestone Path sets ignoreSnoozed=true).
 -- Returns: topPlays, allEvaluated
 function LL.LevelingEngine.FindTopPlays(professionOrLine, currentSkill, targetSkill, options)
     options = options or {}
@@ -757,14 +776,7 @@ function LL.LevelingEngine.FindTopPlays(professionOrLine, currentSkill, targetSk
 
     table.sort(evaluated, SortPlaysByCPSP)
 
-    local topPlays = {}
-    for i = 1, math.min(limit, #evaluated) do
-        local p = evaluated[i]
-        p.rank = i
-        p.summaryLine = LL.LevelingEngine.FormatPlaySummary(i, p)
-        table.insert(topPlays, p)
-    end
-
+    local topPlays = LL.LevelingEngine.SelectTopPlaysFromPool(evaluated, limit, options.ignoreSnoozed == true)
     return topPlays, evaluated
 end
 
@@ -786,8 +798,8 @@ local function DeepCloneOrderBooks(sourceOrderBooks)
     return cloned
 end
 
--- Builds a chained multi-recipe leveling roadmap from startSkill to targetSkill
--- respecting remaining budget, stepped AH order-book depletion, gray cutoffs, and trainer handoffs.
+-- Builds a chained multi-recipe leveling roadmap from startSkill to targetSkill.
+--Snoozed Top 5 plays remain usable in Milestone Path (`ignoreSnoozed = true` by default).
 function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targetSkill, options)
     options = options or {}
     local activeProf = LL.RecipeScanner and LL.RecipeScanner.GetActiveProfession and LL.RecipeScanner.GetActiveProfession() or { skillLine = 164, rank = 1, maxRank = 300 }
@@ -804,6 +816,7 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
 
     local settings = (LevelingLad_DB and LevelingLad_DB.settings) or {}
     local includeTrainer = (options.includeTrainerRecipes ~= nil) and options.includeTrainerRecipes or (settings.includeTrainerRecipes ~= false)
+    local ignoreSnoozed = (options.ignoreSnoozed ~= false)
 
     local candidates = options.customRecipes
         or (LL.RecipeScanner and LL.RecipeScanner.GetRecipesForProfession and LL.RecipeScanner.GetRecipesForProfession(skillLine, includeTrainer))
@@ -830,7 +843,8 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
             riskTolerance = options.riskTolerance,
             includeTrainerRecipes = includeTrainer,
             includeVendorArbitrage = options.includeVendorArbitrage,
-            ignoreInventory = (options.ignoreInventory ~= false), -- Roadmap tracks full materials required across chained steps
+            ignoreInventory = (options.ignoreInventory ~= false),
+            ignoreSnoozed = ignoreSnoozed,
             customRecipes = candidates,
             limit = 1,
         }
@@ -838,7 +852,6 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
         local topPlays = LL.LevelingEngine.FindTopPlays(skillLine, curSkill, goalSkill, stepOpts)
         local best = topPlays and topPlays[1]
         if not best or best.pointsGained <= 0 or best.expectedCrafts <= 0 then
-            -- Determine whether we stopped due to budget exhaustion vs missing recipes/prices
             local unlimitedCheck = LL.LevelingEngine.FindTopPlays(skillLine, curSkill, goalSkill, {
                 budgetOverride = 1e12,
                 customOrderBooks = virtualOrderBooks,
@@ -847,6 +860,7 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
                 includeTrainerRecipes = includeTrainer,
                 includeVendorArbitrage = options.includeVendorArbitrage,
                 ignoreInventory = true,
+                ignoreSnoozed = ignoreSnoozed,
                 customRecipes = candidates,
                 limit = 1,
             })
@@ -858,7 +872,6 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
             break
         end
 
-        -- Consume virtual budget and virtual order-book supply
         remainingBudget = math.max(0, remainingBudget - best.outOfPocketCost)
         if virtualOrderBooks then
             for _, shop in ipairs(best.shoppingList) do
@@ -872,7 +885,6 @@ function LL.LevelingEngine.PlanMilestonePath(professionOrLine, startSkill, targe
             end
         end
 
-        -- Accumulate aggregate shopping list
         for _, shop in ipairs(best.shoppingList) do
             local agg = aggregateReagents[shop.itemId]
             if not agg then

@@ -7,6 +7,7 @@ LL.DetailWindow = {}
 local detailFrame = nil
 local currentPlay = nil
 local shoppingRows = {}
+local bagRefreshPending = false
 local MAX_SHOPPING_ROWS = 20
 local SCROLL_VIEWPORT_HEIGHT = 270
 local SCROLL_STEP = 38
@@ -68,8 +69,10 @@ local function ShowItemTooltip(owner, itemId, itemLink, vendorHint)
     _G.GameTooltip:AddLine(" ")
     if vendorHint then
         _G.GameTooltip:AddLine("|cff00ccffNPC Vendor Reagent:|r " .. vendorHint, 0.2, 0.9, 1)
+        _G.GameTooltip:AddLine("|cff00ff88Buy Vendor:|r Click while talking to the vendor to buy needed stack.", 0.8, 0.8, 0.8)
     else
-        _G.GameTooltip:AddLine("|cff00ff88Click:|r Search on Auction House", 0.8, 0.8, 0.8)
+        _G.GameTooltip:AddLine("|cff00ff88Click:|r Open in Auction House", 0.8, 0.8, 0.8)
+        _G.GameTooltip:AddLine("|cff00ff88Shift-Click:|r Insert into AH Search / Chat", 0.8, 0.8, 0.8)
     end
     _G.GameTooltip:Show()
 end
@@ -104,7 +107,7 @@ end
 
 local function CreateShoppingRow(parent, index, anchorBelow)
     local row = CreateFrame("Frame", "LL_DetailRow" .. index, parent)
-    if row.SetSize then row:SetSize(434, 54) end
+    if row.SetSize then row:SetSize(438, 54) end
     if row.SetPoint then
         if index == 1 then
             row:SetPoint("TOPLEFT", anchorBelow, "BOTTOMLEFT", 0, -6)
@@ -122,14 +125,14 @@ local function CreateShoppingRow(parent, index, anchorBelow)
     end
 
     local itemBtn = CreateFrame("Button", "LL_DetailRowItemBtn" .. index, row)
-    if itemBtn.SetSize then itemBtn:SetSize(296, 16) end
+    if itemBtn.SetSize then itemBtn:SetSize(230, 16) end
     if itemBtn.SetPoint then itemBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 42, -5) end
     BindWheel(itemBtn)
 
     local itemText = itemBtn.CreateFontString and itemBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if itemText then
         if itemText.SetPoint then itemText:SetPoint("LEFT", itemBtn, "LEFT", 0, 0) end
-        if itemText.SetWidth then itemText:SetWidth(296) end
+        if itemText.SetWidth then itemText:SetWidth(230) end
         if itemText.SetJustifyH then itemText:SetJustifyH("LEFT") end
         if itemText.SetWordWrap then pcall(itemText.SetWordWrap, itemText, false) end
     end
@@ -137,7 +140,7 @@ local function CreateShoppingRow(parent, index, anchorBelow)
     local statusText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if statusText then
         if statusText.SetPoint then statusText:SetPoint("TOPLEFT", itemBtn, "BOTTOMLEFT", 0, -3) end
-        if statusText.SetWidth then statusText:SetWidth(296) end
+        if statusText.SetWidth then statusText:SetWidth(230) end
         if statusText.SetJustifyH then statusText:SetJustifyH("LEFT") end
         if statusText.SetWordWrap then pcall(statusText.SetWordWrap, statusText, false) end
     end
@@ -145,15 +148,21 @@ local function CreateShoppingRow(parent, index, anchorBelow)
     local priceText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if priceText then
         if priceText.SetPoint then priceText:SetPoint("TOPLEFT", statusText, "BOTTOMLEFT", 0, -2) end
-        if priceText.SetWidth then priceText:SetWidth(296) end
+        if priceText.SetWidth then priceText:SetWidth(230) end
         if priceText.SetJustifyH then priceText:SetJustifyH("LEFT") end
         if priceText.SetWordWrap then pcall(priceText.SetWordWrap, priceText, false) end
     end
 
+    local buyBtn = CreateFrame("Button", "LL_DetailRowBuyBtn" .. index, row, "UIPanelButtonTemplate")
+    if buyBtn.SetSize then buyBtn:SetSize(76, 22) end
+    if buyBtn.SetPoint then buyBtn:SetPoint("RIGHT", row, "RIGHT", -6, 0) end
+    if buyBtn.SetText then buyBtn:SetText("Buy Next") end
+    BindWheel(buyBtn)
+
     local searchBtn = CreateFrame("Button", "LL_DetailRowSearchBtn" .. index, row, "UIPanelButtonTemplate")
-    if searchBtn.SetSize then searchBtn:SetSize(84, 24) end
-    if searchBtn.SetPoint then searchBtn:SetPoint("RIGHT", row, "RIGHT", -8, 0) end
-    if searchBtn.SetText then searchBtn:SetText("Search AH") end
+    if searchBtn.SetSize then searchBtn:SetSize(74, 22) end
+    if searchBtn.SetPoint then searchBtn:SetPoint("RIGHT", buyBtn, "LEFT", -4, 0) end
+    if searchBtn.SetText then searchBtn:SetText("Open in AH") end
     BindWheel(searchBtn)
 
     itemBtn:SetScript("OnClick", function()
@@ -184,12 +193,35 @@ local function CreateShoppingRow(parent, index, anchorBelow)
         end
     end)
 
+    buyBtn:SetScript("OnClick", function()
+        if row._itemData then
+            if (row._itemData.remainingToBuy or 0) <= 0 then
+                if (row._itemData.inMail or 0) > 0 then
+                    print(string.format(
+                        "|cff00ccff[Leveling Lad]|r You already purchased all required [%s] (%d in mail — check your mailbox!).",
+                        row._itemData.name or "Item",
+                        row._itemData.inMail
+                    ))
+                else
+                    print(string.format("|cff00ccff[Leveling Lad]|r You already have all required [%s] in your bags!", row._itemData.name or "Item"))
+                end
+                return
+            end
+            local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
+            local maxAllowed = row._itemData.verified and row._itemData.maxUnitPrice or nil
+            LL.AHVerifier.BuyNextCheapListing(row._itemData.itemId, row._itemData.name, maxAllowed, rem)
+        elseif row._roadmapStep then
+            LL.DetailWindow.ShowPlay(row._roadmapStep)
+        end
+    end)
+
     row.iconTex = iconTex
     row.itemBtn = itemBtn
     row.itemText = itemText
     row.statusText = statusText
     row.priceText = priceText
     row.searchBtn = searchBtn
+    row.buyBtn = buyBtn
     return row
 end
 
@@ -202,6 +234,7 @@ local function EnsureDetailFrame()
     if detailFrame.SetFrameStrata then detailFrame:SetFrameStrata("MEDIUM") end
     if detailFrame.SetToplevel then detailFrame:SetToplevel(true) end
     if detailFrame.SetMovable then detailFrame:SetMovable(true) end
+    if detailFrame.SetClampedToScreen then pcall(detailFrame.SetClampedToScreen, detailFrame, true) end
     if detailFrame.EnableMouse then detailFrame:EnableMouse(true) end
     if detailFrame.RegisterForDrag then detailFrame:RegisterForDrag("LeftButton") end
     detailFrame:SetScript("OnDragStart", function(self)
@@ -280,7 +313,7 @@ local function EnsureDetailFrame()
     BindWheel(scrollFrame)
 
     local scrollChild = CreateFrame("Frame", "LL_DetailScrollChild", scrollFrame)
-    if scrollChild.SetSize then scrollChild:SetSize(440, SCROLL_VIEWPORT_HEIGHT) end
+    if scrollChild.SetSize then scrollChild:SetSize(442, SCROLL_VIEWPORT_HEIGHT) end
     if scrollFrame.SetScrollChild then pcall(scrollFrame.SetScrollChild, scrollFrame, scrollChild) end
     BindWheel(scrollChild)
 
@@ -471,7 +504,6 @@ function LL.DetailWindow.RefreshIfShown()
         end
     end
 
-    -- Alert Banner (Smart Abort / Trainer Handoff / Circuit Breaker / Budget Exhausted)
     local targetSkill = play.isRoadmap and play.reachedSkill or play.targetSkill or liveSkill
     local startSkill = play.startSkill or 1
     local goalReached = (liveSkill >= targetSkill and targetSkill > startSkill) or (play.goalReached == true)
@@ -503,7 +535,6 @@ function LL.DetailWindow.RefreshIfShown()
         end
     end
 
-    -- Progress Bar
     if detailFrame.progressBar then
         local totalDelta = math.max(1, targetSkill - startSkill)
         local gained = math.max(0, math.min(totalDelta, liveSkill - startSkill))
@@ -517,7 +548,6 @@ function LL.DetailWindow.RefreshIfShown()
         end
     end
 
-    -- Build display rows (Roadmap steps followed by shopping list, or direct shopping list)
     local entries = {}
     if play.isRoadmap and type(play.steps) == "table" then
         for _, step in ipairs(play.steps) do
@@ -596,12 +626,17 @@ function LL.DetailWindow.RefreshIfShown()
                 end
             end
 
+            if row.buyBtn then
+                row.buyBtn:Show()
+                local buyLbl = (LL.AHVerifier and LL.AHVerifier.GetBuyButtonLabel and LL.AHVerifier.GetBuyButtonLabel(item)) or "Buy Next"
+                row.buyBtn:SetText(buyLbl)
+            end
             if row.searchBtn then
                 if item.source == "Vendor" then
                     row.searchBtn:Hide()
                 else
                     row.searchBtn:Show()
-                    row.searchBtn:SetText("Search AH")
+                    row.searchBtn:SetText("Open in AH")
                 end
             end
         elseif entry and entry.kind == "STEP" then
@@ -632,8 +667,11 @@ function LL.DetailWindow.RefreshIfShown()
                 row.priceText:SetText(srcNote)
             end
             if row.searchBtn then
-                row.searchBtn:Show()
-                row.searchBtn:SetText("Inspect")
+                row.searchBtn:Hide()
+            end
+            if row.buyBtn then
+                row.buyBtn:Show()
+                row.buyBtn:SetText("Inspect")
             end
         else
             row._itemData = nil
@@ -673,7 +711,21 @@ function LL.DetailWindow.Init()
         pcall(evFrame.RegisterEvent, evFrame, "BAG_UPDATE")
         pcall(evFrame.RegisterEvent, evFrame, "BAG_UPDATE_DELAYED")
         pcall(evFrame.RegisterEvent, evFrame, "MAIL_INBOX_UPDATE")
-        evFrame:SetScript("OnEvent", function()
+        evFrame:SetScript("OnEvent", function(_, event)
+            if not detailFrame or (detailFrame.IsShown and not detailFrame:IsShown()) then
+                return
+            end
+            if event == "BAG_UPDATE" and _G.C_Timer and _G.C_Timer.After then
+                if not bagRefreshPending then
+                    bagRefreshPending = true
+                    _G.C_Timer.After(0, function()
+                        bagRefreshPending = false
+                        LL.DetailWindow.RefreshIfShown()
+                    end)
+                end
+                return
+            end
+            bagRefreshPending = false
             LL.DetailWindow.RefreshIfShown()
         end)
     end

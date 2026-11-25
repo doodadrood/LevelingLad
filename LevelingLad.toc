@@ -15,6 +15,7 @@ Config.lua
 Utils/Formatter.lua
 Data/VendorDatabase.lua
 Data/RecipeDatabase.lua
+Modules/AuctionatorSource.lua
 Modules/RecipeScanner.lua
 Modules/LevelingEngine.lua
 Modules/AHVerifier.lua
